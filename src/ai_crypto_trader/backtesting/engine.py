@@ -84,6 +84,9 @@ class BacktestResult:
     ledger_entries: int
     equity_curve: tuple[EquityPoint, ...]
     ledger: tuple[BacktestTrade, ...]
+    exposure_percent: Decimal
+    strategy_name: str
+    strategy_parameters: tuple[tuple[str, str], ...]
 
 
 class BacktestEngine:
@@ -106,6 +109,9 @@ class BacktestEngine:
         history = tuple(candles)
         if len(history) < 2:
             raise BacktestError("At least two completed candles are required")
+        minimum_candles = getattr(strategy, "minimum_candles", 2)
+        if type(minimum_candles) is not int or minimum_candles < 2 or len(history) < minimum_candles:
+            raise BacktestError("Insufficient candles for this strategy")
         step_ms = INTERVAL_MINUTES[interval] * 60_000
         previous_ms: int | None = None
         for candle in history:
@@ -132,31 +138,42 @@ class BacktestEngine:
         minimum = initial_capital
         max_drawdown = ZERO
         max_drawdown_pct = ZERO
+        exposed_candles = 0
 
         for index, candle in enumerate(history):
             if pending is not None:
                 signal, signal_candle = pending
                 price = candle.open * (ONE + config.slippage_bps / BPS) if signal.action == "BUY" else (
                     candle.open * (ONE - config.slippage_bps / BPS))
-                slippage = signal.quantity * abs(price - candle.open)
+                quantity = signal.quantity
+                if signal.action == "BUY" and signal.budget_usdt is not None:
+                    budget = min(signal.budget_usdt, portfolio.cash)
+                    quantity = budget / (price * (ONE + config.fee_rate))
+                    while quantity * price * (ONE + config.fee_rate) > budget:
+                        quantity = quantity.next_minus()
+                    if quantity <= ZERO:
+                        raise BacktestError("Backtest BUY budget is too small")
+                slippage = quantity * abs(price - candle.open)
                 try:
                     if signal.action == "BUY":
-                        entry = portfolio.buy(safe.symbol, signal.quantity, price)
+                        entry = portfolio.buy(safe.symbol, quantity, price)
                     else:
-                        entry = portfolio.sell(safe.symbol, signal.quantity, price)
+                        entry = portfolio.sell(safe.symbol, quantity, price)
                 except PortfolioError:
                     raise BacktestError("Insufficient virtual balance or asset for backtest trade") from None
                 # Price already includes slippage. Never debit the cost a second time.
                 equity_after = portfolio.equity({safe.symbol: candle.open})
                 trades.append(BacktestTrade(
                     candle.open_time_utc, safe.symbol, signal.action,
-                    signal_candle.open_time_utc, candle.open_time_utc, signal.quantity,
+                    signal_candle.open_time_utc, candle.open_time_utc, quantity,
                     price, entry.gross_value, entry.commission, slippage,
                     entry.realized_pnl, equity_after,
                 ))
                 pending = None
 
             equity = portfolio.equity({safe.symbol: candle.close})
+            if portfolio.quantity(safe.symbol) > ZERO:
+                exposed_candles += 1
             curve.append(EquityPoint(candle.close_time_utc, equity))
             maximum = max(maximum, equity)
             minimum = min(minimum, equity)
@@ -171,7 +188,7 @@ class BacktestEngine:
             view = PortfolioSnapshot(safe.symbol, portfolio.cash,
                                      portfolio.quantity(safe.symbol),
                                      portfolio.average_entry_price(safe.symbol),
-                                     portfolio.realized_pnl)
+                                     portfolio.realized_pnl, equity)
             signal = strategy.on_candle(history[:index + 1], view)
             self._validate_signal(signal)
             if signal.action != "HOLD" and index + 1 < len(history):
@@ -187,6 +204,9 @@ class BacktestEngine:
             sum(trade.side == "SELL" for trade in trades),
             maximum, minimum, max_drawdown, max_drawdown_pct, len(history), len(trades),
             tuple(curve), tuple(trades),
+            Decimal(exposed_candles) / Decimal(len(history)) * Decimal("100"),
+            getattr(strategy, "name", type(strategy).__name__),
+            getattr(strategy, "parameters", ()),
         )
 
     @staticmethod
@@ -194,8 +214,17 @@ class BacktestEngine:
         if not isinstance(signal, Signal) or signal.action not in {"HOLD", "BUY", "SELL"}:
             raise BacktestError("Unknown backtest signal")
         if signal.action == "HOLD":
-            if signal.quantity is not None:
-                raise BacktestError("HOLD cannot carry quantity")
-        elif (not isinstance(signal.quantity, Decimal) or not signal.quantity.is_finite()
-              or signal.quantity <= ZERO):
-            raise BacktestError("Trade quantity must be a positive Decimal")
+            if signal.quantity is not None or signal.budget_usdt is not None:
+                raise BacktestError("HOLD cannot carry quantity or budget")
+        elif signal.action == "SELL":
+            if signal.budget_usdt is not None or not BacktestEngine._positive_decimal(signal.quantity):
+                raise BacktestError("SELL quantity must be a positive Decimal")
+        elif ((signal.quantity is None) == (signal.budget_usdt is None)
+              or not BacktestEngine._positive_decimal(
+                  signal.quantity if signal.quantity is not None else signal.budget_usdt
+              )):
+            raise BacktestError("BUY requires exactly one positive Decimal quantity or USDT budget")
+
+    @staticmethod
+    def _positive_decimal(value: object) -> bool:
+        return isinstance(value, Decimal) and value.is_finite() and value > ZERO

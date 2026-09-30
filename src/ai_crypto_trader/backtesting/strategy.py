@@ -16,12 +16,14 @@ class PortfolioSnapshot:
     quantity: Decimal
     average_entry_price: Decimal
     realized_pnl: Decimal
+    equity: Decimal
 
 
 @dataclass(frozen=True)
 class Signal:
     action: str = "HOLD"
     quantity: Decimal | None = None
+    budget_usdt: Decimal | None = None
 
 
 class Strategy(Protocol):

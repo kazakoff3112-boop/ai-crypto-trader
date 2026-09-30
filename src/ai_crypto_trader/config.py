@@ -48,6 +48,7 @@ class Settings:
     max_manual_price_change_bps: Decimal = Decimal("10")
     database_path: Path = Path("data/ai_crypto_trader.sqlite3")
     historical_cache_path: Path = Path("data/historical_market_data.sqlite3")
+    backtest_position_size_pct: Decimal = Decimal("25")
 
     def __post_init__(self) -> None:
         validate_trading_mode(self.trading_mode)
@@ -73,6 +74,10 @@ class Settings:
             or not 0 <= self.max_manual_price_change_bps < 10_000
         ):
             raise ValueError("Manual price change tolerance BPS must be in [0, 10000)")
+        if (not isinstance(self.backtest_position_size_pct, Decimal)
+                or not self.backtest_position_size_pct.is_finite()
+                or not 0 < self.backtest_position_size_pct <= 100):
+            raise ValueError("Backtest position size must be in (0, 100] percent")
 
 
 def load_settings(dotenv_path: str | Path = ".env", environ: Mapping[str, str] | None = None) -> Settings:
@@ -96,4 +101,5 @@ def load_settings(dotenv_path: str | Path = ".env", environ: Mapping[str, str] |
         ),
         database_path=Path(source.get("DATABASE_PATH", "data/ai_crypto_trader.sqlite3")),
         historical_cache_path=Path(source.get("HISTORICAL_CACHE_PATH", "data/historical_market_data.sqlite3")),
+        backtest_position_size_pct=Decimal(source.get("BACKTEST_POSITION_SIZE_PCT", "25")),
     )
