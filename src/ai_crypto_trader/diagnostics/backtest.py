@@ -14,6 +14,7 @@ from ..backtesting.test_strategies import BuyOnceStrategy, BuyThenSellStrategy, 
 from ..config import load_settings
 from ..database.historical_cache import HistoricalCache
 from ..market_data.candle import HistoricalDataUnavailable, INTERVAL_MINUTES, utc_from_ms
+from ..strategies.donchian_breakout import DonchianBreakoutStrategy
 from ..strategies.sma_cross import SMACrossoverStrategy
 
 
@@ -26,15 +27,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--symbol", required=True, choices=("BTCUSDT", "ETHUSDT"))
     parser.add_argument("--interval", required=True, choices=tuple(INTERVAL_MINUTES))
     parser.add_argument("--strategy", required=True,
-                        choices=("no-trade", "buy-once", "buy-then-sell", "sma-cross"))
+                        choices=("no-trade", "buy-once", "buy-then-sell", "sma-cross", "donchian-breakout"))
     parser.add_argument("--fast", type=int)
     parser.add_argument("--slow", type=int)
+    parser.add_argument("--entry-lookback", type=int)
+    parser.add_argument("--exit-lookback", type=int)
     parser.add_argument("--position-size-pct", type=Decimal)
     args = parser.parse_args(argv)
-    if args.strategy != "sma-cross" and any(
-        value is not None for value in (args.fast, args.slow, args.position_size_pct)
+    if args.strategy != "sma-cross" and any(value is not None for value in (args.fast, args.slow)):
+        parser.error("--fast and --slow require --strategy sma-cross")
+    if args.strategy != "donchian-breakout" and any(
+        value is not None for value in (args.entry_lookback, args.exit_lookback)
     ):
-        parser.error("SMA parameters require --strategy sma-cross")
+        parser.error("Donchian lookbacks require --strategy donchian-breakout")
+    if args.strategy not in {"sma-cross", "donchian-breakout"} and args.position_size_pct is not None:
+        parser.error("Position size requires a baseline strategy")
     fixtures = {
         "no-trade": NoTradeStrategy,
         "buy-once": BuyOnceStrategy,
@@ -50,14 +57,22 @@ def main(argv: list[str] | None = None) -> int:
         step = timedelta(minutes=INTERVAL_MINUTES[args.interval])
         candles = cache.load(args.symbol, args.interval, utc_from_ms(first_ms),
                              utc_from_ms(last_ms) + step)
-        strategy = (
-            SMACrossoverStrategy(
+        if args.strategy == "sma-cross":
+            strategy = SMACrossoverStrategy(
                 fast=20 if args.fast is None else args.fast,
                 slow=50 if args.slow is None else args.slow,
                 position_size_pct=(settings.backtest_position_size_pct
                                    if args.position_size_pct is None else args.position_size_pct),
-            ) if args.strategy == "sma-cross" else fixtures[args.strategy]()
-        )
+            )
+        elif args.strategy == "donchian-breakout":
+            strategy = DonchianBreakoutStrategy(
+                entry_lookback=96 if args.entry_lookback is None else args.entry_lookback,
+                exit_lookback=48 if args.exit_lookback is None else args.exit_lookback,
+                position_size_pct=(Decimal("25") if args.position_size_pct is None
+                                   else args.position_size_pct),
+            )
+        else:
+            strategy = fixtures[args.strategy]()
         execution_config = BacktestConfig.from_settings(settings)
         result = BacktestEngine().run(
             candles, strategy, symbol=args.symbol, interval=args.interval,
@@ -77,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Max drawdown: {result.max_drawdown_usdt} USDT ({result.max_drawdown_percent}%)")
         print(f"Exposure: {result.exposure_percent}% of closed candles")
         print(f"Backtest ledger entries: {result.ledger_entries}; no PAPER trades or Bybit calls")
-        if args.strategy == "sma-cross":
+        if args.strategy in {"sma-cross", "donchian-breakout"}:
             quality = analyze_backtest(result)
             print("TRADE QUALITY")
             print(f"Completed trades: {quality.completed_trade_count}")
@@ -114,7 +129,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Buy & Hold max drawdown: {benchmark.max_drawdown_usdt} USDT "
                   f"({benchmark.max_drawdown_percent}%)")
             print(f"Buy & Hold trading costs: {benchmark_quality.total_trading_costs} USDT")
-            print(f"SMA strategy return: {result.total_return_percent}%")
+            label = "SMA" if args.strategy == "sma-cross" else "Donchian"
+            print(f"{label} strategy return: {result.total_return_percent}%")
             print(f"Difference: {result.total_return_percent - benchmark.total_return_percent} percentage points")
         return 0
     except (HistoricalDataUnavailable, BacktestError, sqlite3.Error, OSError, ValueError):
