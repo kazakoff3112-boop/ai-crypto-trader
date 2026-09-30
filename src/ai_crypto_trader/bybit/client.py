@@ -57,6 +57,22 @@ class BybitReadOnlyClient:
         safe = validate_request(TradingRequest(symbol=symbol, category=category))
         return self._get("/v5/market/tickers", {"category": "spot", "symbol": safe.symbol})
 
+    def get_spot_klines(
+        self, symbol: str, interval_code: str, start_ms: int, end_ms: int,
+        *, category: str = "spot", limit: int = 1000,
+    ) -> dict[str, Any]:
+        """Fixed public V5 GET only; the caller validates the returned candles."""
+        safe = validate_request(TradingRequest(symbol=symbol, category=category))
+        if interval_code not in {"1", "5", "15", "60"}:
+            raise ValueError("Unsupported spot kline interval")
+        if (type(start_ms) is not int or type(end_ms) is not int or start_ms < 0
+                or end_ms < start_ms or type(limit) is not int or not 1 <= limit <= 1000):
+            raise ValueError("Invalid spot kline request range or limit")
+        return self._get("/v5/market/kline", {
+            "category": "spot", "symbol": safe.symbol, "interval": interval_code,
+            "start": str(start_ms), "end": str(end_ms), "limit": str(limit),
+        })
+
     def check_demo_credentials(self) -> bool:
         """GET account info solely to confirm Demo credentials; discard its payload."""
         if not self._api_key or not self._api_secret:
