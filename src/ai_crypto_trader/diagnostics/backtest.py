@@ -10,6 +10,7 @@ import sqlite3
 from ..backtesting import BacktestConfig, BacktestEngine, BacktestError
 from ..backtesting.analytics import analyze_backtest
 from ..backtesting.benchmark import run_buy_and_hold
+from ..backtesting.periods import BacktestPeriod, parse_utc
 from ..backtesting.test_strategies import BuyOnceStrategy, BuyThenSellStrategy, NoTradeStrategy
 from ..config import load_settings
 from ..database.historical_cache import HistoricalCache
@@ -33,7 +34,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--entry-lookback", type=int)
     parser.add_argument("--exit-lookback", type=int)
     parser.add_argument("--position-size-pct", type=Decimal)
+    parser.add_argument("--start", help="inclusive ISO 8601 UTC candle open")
+    parser.add_argument("--end", help="exclusive ISO 8601 UTC candle open")
     args = parser.parse_args(argv)
+    if (args.start is None) != (args.end is None):
+        parser.error("--start and --end must be supplied together")
     if args.strategy != "sma-cross" and any(value is not None for value in (args.fast, args.slow)):
         parser.error("--fast and --slow require --strategy sma-cross")
     if args.strategy != "donchian-breakout" and any(
@@ -49,14 +54,6 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         settings = load_settings()
-        cache = HistoricalCache.open_readonly(settings.historical_cache_path)
-        matches = [row for row in cache.summary() if row[0] == args.symbol and row[1] == args.interval]
-        if len(matches) != 1:
-            raise HistoricalDataUnavailable("No cached candles for symbol and interval")
-        _, _, _, first_ms, last_ms, _ = matches[0]
-        step = timedelta(minutes=INTERVAL_MINUTES[args.interval])
-        candles = cache.load(args.symbol, args.interval, utc_from_ms(first_ms),
-                             utc_from_ms(last_ms) + step)
         if args.strategy == "sma-cross":
             strategy = SMACrossoverStrategy(
                 fast=20 if args.fast is None else args.fast,
@@ -73,12 +70,35 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             strategy = fixtures[args.strategy]()
+        cache = HistoricalCache.open_readonly(settings.historical_cache_path)
+        period = None
+        if args.start is not None:
+            period = BacktestPeriod.create(
+                parse_utc(args.start), parse_utc(args.end), args.interval,
+                warmup_candles=strategy.minimum_candles - 2 if hasattr(strategy, "minimum_candles") else 0,
+            )
+            candles = cache.load(args.symbol, args.interval,
+                                 period.warmup_start or period.evaluation_start,
+                                 period.evaluation_end)
+        else:
+            matches = [row for row in cache.summary() if row[0] == args.symbol and row[1] == args.interval]
+            if len(matches) != 1:
+                raise HistoricalDataUnavailable("No cached candles for symbol and interval")
+            _, _, _, first_ms, last_ms, _ = matches[0]
+            step = timedelta(minutes=INTERVAL_MINUTES[args.interval])
+            candles = cache.load(args.symbol, args.interval, utc_from_ms(first_ms),
+                                 utc_from_ms(last_ms) + step)
         execution_config = BacktestConfig.from_settings(settings)
         result = BacktestEngine().run(
             candles, strategy, symbol=args.symbol, interval=args.interval,
-            config=execution_config,
+            config=execution_config, period=period,
         )
         print(f"OFFLINE BACKTEST — {result.strategy_name}")
+        print(f"Evaluation period: [{result.evaluation_start.isoformat()}, {result.evaluation_end.isoformat()}) UTC")
+        print(f"Warm-up period: [{result.warmup_start.isoformat()}, {result.evaluation_start.isoformat()}) UTC"
+              if result.warmup_start is not None else "Warm-up period: none")
+        print(f"Evaluation candles: {result.evaluation_candles}")
+        print(f"Warm-up candles: {result.warmup_candles}")
         if result.strategy_parameters:
             print("Parameters: " + ", ".join(f"{name}={value}" for name, value in result.strategy_parameters))
         print(f"Symbol/interval: {args.symbol} {args.interval}; candles: {result.candles_processed}")
@@ -121,8 +141,12 @@ def main(argv: list[str] | None = None) -> int:
             if quality.open_position is not None:
                 print(f"Open position (not a completed trade): {quality.open_position.quantity} {args.symbol}; "
                       f"unrealized P&L {quality.open_position.unrealized_pnl} USDT")
-            benchmark = run_buy_and_hold(candles, symbol=args.symbol, interval=args.interval,
+            evaluation_candles = candles[result.warmup_candles:]
+            benchmark = run_buy_and_hold(evaluation_candles, symbol=args.symbol, interval=args.interval,
                                          config=execution_config, initial_capital=result.initial_capital)
+            if (benchmark.evaluation_start != result.evaluation_start
+                    or benchmark.evaluation_end != result.evaluation_end):
+                raise BacktestError("Benchmark evaluation period differs from strategy")
             benchmark_quality = analyze_backtest(benchmark)
             print(f"Buy & Hold final equity: {benchmark.final_equity} USDT")
             print(f"Buy & Hold return: {benchmark.total_return_percent}%")

@@ -124,6 +124,15 @@ class HistoricalCache:
                 MAX(open_time_ms),MAX(fetched_at_utc) FROM candles
                 GROUP BY symbol,interval ORDER BY symbol,interval""").fetchall()
 
+    def count_range(self, symbol: str, interval: str, start: datetime, end: datetime,
+                    *, category: str = "spot") -> int:
+        """Count cached rows in [start,end) without writing or requiring completeness."""
+        symbol, _, start_ms, end_ms = validate_range(symbol, category, interval, start, end)
+        with self._connect() as db:
+            return db.execute("""SELECT COUNT(*) FROM candles WHERE symbol=? AND interval=?
+                AND open_time_ms>=? AND open_time_ms<?""",
+                (symbol, interval, start_ms, end_ms)).fetchone()[0]
+
     def batches(self) -> list[tuple[str, str, int, int, int, str, str]]:
         with self._connect() as db:
             return db.execute("""SELECT symbol,interval,first_open_ms,last_open_ms,

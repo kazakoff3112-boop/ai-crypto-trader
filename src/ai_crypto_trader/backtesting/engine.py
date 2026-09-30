@@ -13,6 +13,7 @@ from ..market_data.candle import (
 )
 from ..portfolio import Portfolio, PortfolioError
 from ..safety.guard import TradingRequest, validate_request
+from .periods import BacktestPeriod
 from .strategy import PortfolioSnapshot, Signal, Strategy
 
 ZERO = Decimal("0")
@@ -91,13 +92,19 @@ class BacktestResult:
     final_cash: Decimal
     final_quantity: Decimal
     final_close_price: Decimal
+    evaluation_start: datetime
+    evaluation_end: datetime
+    warmup_start: datetime | None
+    warmup_candles: int
+    evaluation_candles: int
 
 
 class BacktestEngine:
     def run(self, candles: Sequence[Candle], strategy: Strategy, *, symbol: str,
             interval: str, initial_capital: Decimal = Decimal("1000"),
             config: BacktestConfig | None = None, category: str = "spot",
-            as_of_utc: datetime | None = None) -> BacktestResult:
+            as_of_utc: datetime | None = None,
+            period: BacktestPeriod | None = None) -> BacktestResult:
         safe = validate_request(TradingRequest(symbol=symbol, category=category))
         config = config if config is not None else BacktestConfig()
         if not isinstance(config, BacktestConfig):
@@ -132,6 +139,28 @@ class BacktestEngine:
                 raise BacktestError("Unclosed candle is forbidden")
             previous_ms = ms
 
+        if period is None:
+            period = BacktestPeriod.create(history[0].open_time_utc,
+                                           history[-1].close_time_utc, interval)
+        else:
+            if not isinstance(period, BacktestPeriod) or period.interval != interval:
+                raise BacktestError("Invalid evaluation period")
+            try:
+                expected_period = BacktestPeriod.create(
+                    period.evaluation_start, period.evaluation_end, interval,
+                    warmup_candles=period.warmup_candles,
+                )
+            except (ValueError, AttributeError, TypeError):
+                raise BacktestError("Invalid evaluation period") from None
+            if (period != expected_period
+                    or period.evaluation_candles < 2
+                    or period.warmup_candles != minimum_candles - 2
+                    or len(history) != period.warmup_candles + period.evaluation_candles
+                    or history[0].open_time_utc != (period.warmup_start or period.evaluation_start)
+                    or history[period.warmup_candles].open_time_utc != period.evaluation_start
+                    or history[-1].close_time_utc != period.evaluation_end):
+                raise BacktestError("Candles do not exactly match evaluation and warm-up periods")
+
         # Never call Portfolio.open(): this in-memory instance has a fresh Ledger.
         portfolio = Portfolio(Settings(spot_fee_rate=config.fee_rate), initial_cash=initial_capital)
         trades: list[BacktestTrade] = []
@@ -144,7 +173,8 @@ class BacktestEngine:
         max_drawdown_pct = ZERO
         exposed_candles = 0
 
-        for index, candle in enumerate(history):
+        for index in range(period.warmup_candles, len(history)):
+            candle = history[index]
             if pending is not None:
                 signal, signal_candle = pending
                 price = candle.open * (ONE + config.slippage_bps / BPS) if signal.action == "BUY" else (
@@ -206,12 +236,15 @@ class BacktestEngine:
             portfolio.total_commission, sum((trade.slippage_cost for trade in trades), ZERO),
             sum(trade.side == "BUY" for trade in trades),
             sum(trade.side == "SELL" for trade in trades),
-            maximum, minimum, max_drawdown, max_drawdown_pct, len(history), len(trades),
+            maximum, minimum, max_drawdown, max_drawdown_pct,
+            period.evaluation_candles, len(trades),
             tuple(curve), tuple(trades),
-            Decimal(exposed_candles) / Decimal(len(history)) * Decimal("100"),
+            Decimal(exposed_candles) / Decimal(period.evaluation_candles) * Decimal("100"),
             getattr(strategy, "name", type(strategy).__name__),
             getattr(strategy, "parameters", ()),
             safe.symbol, portfolio.cash, portfolio.quantity(safe.symbol), history[-1].close,
+            period.evaluation_start, period.evaluation_end,
+            period.warmup_start, period.warmup_candles, period.evaluation_candles,
         )
 
     @staticmethod
