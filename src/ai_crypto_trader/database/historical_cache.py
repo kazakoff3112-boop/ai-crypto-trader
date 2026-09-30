@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import sqlite3
 
-from ..market_data.historical import (
+from ..market_data.candle import (
     Candle, HistoricalDataUnavailable, INTERVAL_MINUTES, epoch_ms, utc_from_ms,
     validate_candle, validate_range,
 )
@@ -16,6 +16,7 @@ from ..market_data.historical import (
 class HistoricalCache:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        self._read_only = False
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
@@ -35,10 +36,25 @@ class HistoricalCache:
                 PRIMARY KEY(symbol, interval, first_open_ms, last_open_ms, candle_count))""")
             db.execute("PRAGMA user_version = 2")
 
+    @classmethod
+    def open_readonly(cls, path: str | Path) -> "HistoricalCache":
+        """Open an existing cache without creating files or running migrations."""
+        cache = cls.__new__(cls)
+        cache.path = Path(path)
+        cache._read_only = True
+        with cache._connect() as db:
+            if db.execute("PRAGMA user_version").fetchone()[0] != 2:
+                raise HistoricalDataUnavailable("Unsupported historical cache schema")
+        return cache
+
     def _connect(self) -> sqlite3.Connection:
+        if self._read_only:
+            return sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)
         return sqlite3.connect(self.path)
 
     def save(self, candles: list[Candle], *, fetched_at: datetime | None = None) -> None:
+        if self._read_only:
+            raise HistoricalDataUnavailable("Read-only historical cache cannot be changed")
         if not candles:
             return
         stamp = (fetched_at or datetime.now(timezone.utc)).isoformat()
