@@ -8,12 +8,17 @@ from decimal import Decimal
 import sqlite3
 
 from ..backtesting import BacktestConfig, BacktestEngine, BacktestError
+from ..backtesting.analytics import analyze_backtest
 from ..backtesting.benchmark import run_buy_and_hold
 from ..backtesting.test_strategies import BuyOnceStrategy, BuyThenSellStrategy, NoTradeStrategy
 from ..config import load_settings
 from ..database.historical_cache import HistoricalCache
 from ..market_data.candle import HistoricalDataUnavailable, INTERVAL_MINUTES, utc_from_ms
 from ..strategies.sma_cross import SMACrossoverStrategy
+
+
+def _usdt(value: Decimal | None) -> str:
+    return "N/A" if value is None else f"{value} USDT"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -73,9 +78,42 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Exposure: {result.exposure_percent}% of closed candles")
         print(f"Backtest ledger entries: {result.ledger_entries}; no PAPER trades or Bybit calls")
         if args.strategy == "sma-cross":
+            quality = analyze_backtest(result)
+            print("TRADE QUALITY")
+            print(f"Completed trades: {quality.completed_trade_count}")
+            print(f"Wins: {quality.winning_trades}")
+            print(f"Losses: {quality.losing_trades}")
+            print(f"Breakeven: {quality.breakeven_trades}")
+            print(f"Win rate: {quality.win_rate_percent}%")
+            print(f"Loss rate: {quality.loss_rate_percent}%")
+            print(f"Average / median net P&L: {_usdt(quality.average_net_pnl)} / {_usdt(quality.median_net_pnl)}")
+            print(f"Average winner: {_usdt(quality.average_winner)}")
+            print(f"Average loser: {_usdt(quality.average_loser)}")
+            print(f"Largest winner / loser: {_usdt(quality.largest_winner)} / {_usdt(quality.largest_loser)}")
+            print(f"Gross profit / loss: {quality.gross_profit} / {quality.gross_loss} USDT")
+            print(f"Profit factor: {quality.profit_factor if quality.profit_factor is not None else 'N/A (no losses)'}")
+            print(f"Average holding time: {quality.average_holding_time if quality.average_holding_time is not None else 'N/A'}")
+            print(f"Min / max holding time: {quality.minimum_holding_time if quality.minimum_holding_time is not None else 'N/A'} / "
+                  f"{quality.maximum_holding_time if quality.maximum_holding_time is not None else 'N/A'}")
+            print(f"Turnover: {quality.total_traded_notional} USDT")
+            print(f"Total commission / slippage: {quality.total_commissions} / {quality.total_slippage} USDT")
+            print(f"P&L before costs: {quality.strategy_pnl_before_costs} USDT")
+            print(f"Trading costs: {quality.total_trading_costs} USDT")
+            print(f"P&L after costs: {quality.strategy_pnl_after_costs} USDT")
+            print(f"Commission/slippage drag: {quality.commission_drag} / {quality.slippage_drag} USDT")
+            print(f"Approx. return before costs: {quality.approximate_return_before_costs_percent}%")
+            print(f"Return after costs: {quality.return_after_costs_percent}%")
+            if quality.open_position is not None:
+                print(f"Open position (not a completed trade): {quality.open_position.quantity} {args.symbol}; "
+                      f"unrealized P&L {quality.open_position.unrealized_pnl} USDT")
             benchmark = run_buy_and_hold(candles, symbol=args.symbol, interval=args.interval,
                                          config=execution_config, initial_capital=result.initial_capital)
+            benchmark_quality = analyze_backtest(benchmark)
+            print(f"Buy & Hold final equity: {benchmark.final_equity} USDT")
             print(f"Buy & Hold return: {benchmark.total_return_percent}%")
+            print(f"Buy & Hold max drawdown: {benchmark.max_drawdown_usdt} USDT "
+                  f"({benchmark.max_drawdown_percent}%)")
+            print(f"Buy & Hold trading costs: {benchmark_quality.total_trading_costs} USDT")
             print(f"SMA strategy return: {result.total_return_percent}%")
             print(f"Difference: {result.total_return_percent - benchmark.total_return_percent} percentage points")
         return 0

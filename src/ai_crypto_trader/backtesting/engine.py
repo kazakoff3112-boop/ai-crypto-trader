@@ -87,6 +87,10 @@ class BacktestResult:
     exposure_percent: Decimal
     strategy_name: str
     strategy_parameters: tuple[tuple[str, str], ...]
+    symbol: str
+    final_cash: Decimal
+    final_quantity: Decimal
+    final_close_price: Decimal
 
 
 class BacktestEngine:
@@ -207,6 +211,7 @@ class BacktestEngine:
             Decimal(exposed_candles) / Decimal(len(history)) * Decimal("100"),
             getattr(strategy, "name", type(strategy).__name__),
             getattr(strategy, "parameters", ()),
+            safe.symbol, portfolio.cash, portfolio.quantity(safe.symbol), history[-1].close,
         )
 
     @staticmethod
