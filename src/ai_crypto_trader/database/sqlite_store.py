@@ -8,7 +8,7 @@ from pathlib import Path
 import sqlite3
 
 from ..portfolio.ledger import LedgerEntry
-from .migrations import apply_migrations
+from .migrations import CURRENT_SCHEMA_VERSION, apply_migrations
 
 
 class DataIntegrityError(RuntimeError):
@@ -31,14 +31,28 @@ DECIMAL_FIELDS = (
 
 
 class SQLiteLedgerStore:
-    def __init__(self, database_path: str | Path, initial_cash: Decimal) -> None:
+    def __init__(self, database_path: str | Path, initial_cash: Decimal, *, read_only: bool = False) -> None:
         self.path = Path(database_path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(str(self.path))
+        self._read_only = read_only
+        if read_only:
+            self._connection = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True)
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._connection = sqlite3.connect(str(self.path))
         self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA foreign_keys = ON")
-        apply_migrations(self._connection)
-        self._initialize_metadata(initial_cash)
+        try:
+            if read_only:
+                self._connection.execute("PRAGMA query_only = ON")
+                self._check_schema_version()
+                if self.initial_cash != initial_cash:
+                    raise DataIntegrityError("Configured initial cash conflicts with existing database")
+            else:
+                self._connection.execute("PRAGMA foreign_keys = ON")
+                apply_migrations(self._connection)
+                self._initialize_metadata(initial_cash)
+        except Exception:
+            self._connection.close()
+            raise
 
     @property
     def initial_cash(self) -> Decimal:
@@ -50,6 +64,8 @@ class SQLiteLedgerStore:
         return self._parse_decimal(row[0], "initial_cash")
 
     def append(self, entry: LedgerEntry) -> None:
+        if self._read_only:
+            raise DataIntegrityError("Read-only ledger cannot accept entries")
         values = (
             entry.id,
             entry.timestamp_utc.isoformat(),
@@ -113,6 +129,16 @@ class SQLiteLedgerStore:
 
     def close(self) -> None:
         self._connection.close()
+
+    def _check_schema_version(self) -> None:
+        try:
+            rows = self._connection.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise DataIntegrityError("Missing database schema version") from exc
+        if [row[0] for row in rows] != list(range(1, CURRENT_SCHEMA_VERSION + 1)):
+            raise DataIntegrityError("Database schema is missing, incomplete, or unsupported")
 
     def _initialize_metadata(self, initial_cash: Decimal) -> None:
         if not initial_cash.is_finite() or initial_cash < 0:

@@ -59,11 +59,14 @@ class Portfolio:
         *,
         initial_cash: DecimalInput | None = None,
         ledger: Ledger | None = None,
+        read_only: bool = False,
     ) -> None:
         settings = settings or Settings()
         starting_cash = settings.initial_capital_usdt if initial_cash is None else _decimal(initial_cash, "initial_cash")
         if starting_cash < ZERO:
             raise PortfolioError("initial_cash cannot be negative")
+        self._initial_cash = starting_cash
+        self._read_only = read_only
         self._cash = starting_cash
         self._fee_rate = settings.spot_fee_rate
         self._positions = {"BTCUSDT": Position(), "ETHUSDT": Position()}
@@ -81,20 +84,23 @@ class Portfolio:
         *,
         database_path: str | None = None,
         initial_cash: DecimalInput | None = None,
+        read_only: bool = False,
     ) -> "Portfolio":
         """Open or create a persistent portfolio and deterministically replay it."""
         from ..database.sqlite_store import SQLiteLedgerStore
 
         settings = settings or Settings()
         starting_cash = settings.initial_capital_usdt if initial_cash is None else _decimal(initial_cash, "initial_cash")
-        store = SQLiteLedgerStore(database_path or settings.database_path, starting_cash)
+        store = SQLiteLedgerStore(
+            database_path or settings.database_path, starting_cash, read_only=read_only
+        )
         try:
             ledger = Ledger(
                 store.load_entries(),
-                persist_entry=store.append,
+                persist_entry=None if read_only else store.append,
                 close_storage=store.close,
             )
-            return cls(settings, initial_cash=store.initial_cash, ledger=ledger)
+            return cls(settings, initial_cash=store.initial_cash, ledger=ledger, read_only=read_only)
         except Exception:
             store.close()
             raise
@@ -102,6 +108,10 @@ class Portfolio:
     @property
     def cash(self) -> Decimal:
         return self._cash
+
+    @property
+    def initial_cash(self) -> Decimal:
+        return self._initial_cash
 
     @property
     def free_usdt(self) -> Decimal:
@@ -156,6 +166,8 @@ class Portfolio:
         market_bid: DecimalInput | None = None,
         market_ask: DecimalInput | None = None,
     ) -> LedgerEntry:
+        if self._read_only:
+            raise PortfolioError("Read-only Portfolio cannot execute trades")
         safe_symbol = self._safe_symbol(symbol)
         qty, price, slippage = self._validated_trade_values(quantity, execution_price, slippage_cost)
         bid, ask = self._validated_market_reference("BUY", qty, price, slippage, market_bid, market_ask)
@@ -206,6 +218,8 @@ class Portfolio:
         market_bid: DecimalInput | None = None,
         market_ask: DecimalInput | None = None,
     ) -> LedgerEntry:
+        if self._read_only:
+            raise PortfolioError("Read-only Portfolio cannot execute trades")
         safe_symbol = self._safe_symbol(symbol)
         qty, price, slippage = self._validated_trade_values(quantity, execution_price, slippage_cost)
         bid, ask = self._validated_market_reference("SELL", qty, price, slippage, market_bid, market_ask)
