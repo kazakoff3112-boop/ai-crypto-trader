@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from contextlib import redirect_stdout
 from io import BytesIO
+from io import StringIO
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -16,7 +18,7 @@ from ai_crypto_trader.config import Settings
 from ai_crypto_trader.database.historical_cache import HistoricalCache
 from ai_crypto_trader.diagnostics.historical_data import main
 from ai_crypto_trader.market_data.historical import (
-    HistoricalDataUnavailable, HistoricalMarketDataClient, epoch_ms,
+    HistoricalDataUnavailable, HistoricalDownloadUnavailable, HistoricalMarketDataClient, epoch_ms,
 )
 from ai_crypto_trader.safety.guard import SafetyViolation
 
@@ -87,6 +89,25 @@ class HistoricalTests(unittest.TestCase):
         self.assertEqual(candles[-1].open_time_utc, START + timedelta(minutes=1001))
         self.assertEqual(parse_qs(urlparse(self.requests[-2].full_url).query)["limit"], ["1000"])
 
+    def test_second_page_failure_reports_exact_safe_context(self):
+        def alter_second_page(payload):
+            if len(self.requests) == 2:
+                payload["result"]["list"].pop()
+            return payload
+
+        self.alter = alter_second_page
+        with self.assertRaises(HistoricalDownloadUnavailable) as caught:
+            self.fetch(count=1002)
+        error = caught.exception
+        self.assertEqual(error.category, "page_count_mismatch")
+        self.assertEqual(error.page_number, 2)
+        self.assertEqual(error.page_start_ms, epoch_ms(START + timedelta(minutes=1000)))
+        self.assertEqual(error.page_end_ms, epoch_ms(START + timedelta(minutes=1002)))
+        rendered = str(error)
+        self.assertIn("expected=2, received=1", rendered)
+        self.assertIn("page=2", rendered)
+        self.assertIn("page_range=[2024-01-01T16:40:00+00:00, 2024-01-01T16:42:00+00:00)", rendered)
+
     def test_completed_only_excludes_current_interval(self):
         market = HistoricalMarketDataClient(self.bybit, clock=lambda: START + timedelta(minutes=2, seconds=30))
         candles = market.fetch_candles("BTCUSDT", "1m", START, START + timedelta(minutes=3))
@@ -150,6 +171,30 @@ class HistoricalTests(unittest.TestCase):
             HistoricalMarketDataClient(malformed).fetch_candles(
                 "BTCUSDT", "1m", START, START + timedelta(minutes=1))
 
+    def test_cli_preserves_structured_failure_without_sensitive_values(self):
+        failure = HistoricalDownloadUnavailable(
+            "bybit_api_error", START, START + timedelta(days=920), page_number=7,
+            page_start_ms=epoch_ms(START + timedelta(hours=6000)),
+            page_end_ms=epoch_ms(START + timedelta(hours=7000)),
+            detail="Bybit API error code 10006",
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "history.sqlite3"
+            output = StringIO()
+            with patch.dict("os.environ", {"HISTORICAL_CACHE_PATH": str(path),
+                                           "BYBIT_API_KEY": "never-print-key",
+                                           "BYBIT_API_SECRET": "never-print-secret"}):
+                with patch.object(HistoricalMarketDataClient, "fetch_candles", side_effect=failure):
+                    with redirect_stdout(output):
+                        self.assertEqual(main(["--symbol", "BTCUSDT", "--interval", "1h",
+                                               "--days", "920"]), 1)
+        rendered = output.getvalue()
+        for expected in ("category=bybit_api_error", "page=7", "page_range=",
+                         "Bybit API error code 10006"):
+            self.assertIn(expected, rendered)
+        self.assertNotIn("never-print-key", rendered)
+        self.assertNotIn("never-print-secret", rendered)
+
     def test_cache_restart_precision_conflict_and_offline(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "history.sqlite3"
@@ -167,8 +212,9 @@ class HistoricalTests(unittest.TestCase):
             with self.assertRaises(HistoricalDataUnavailable):
                 reloaded.load("BTCUSDT", "1m", START, START + timedelta(minutes=3))
             self.alter = lambda p: p["result"]["list"][0].__setitem__(1, "1.2") or p
-            with self.assertRaises(HistoricalDataUnavailable):
+            with self.assertRaises(HistoricalDataUnavailable) as caught:
                 cache.save(self.fetch())
+            self.assertIn("2024-01-01T00:01:00+00:00", str(caught.exception))
             self.assertEqual(reloaded.summary()[0][2], 2)
 
     def test_cache_corruption_rejected(self):

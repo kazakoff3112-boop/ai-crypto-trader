@@ -64,12 +64,20 @@ class HistoricalCache:
         step = None
         rows = []
         for candle in candles:
-            validate_candle(candle)
+            try:
+                validate_candle(candle)
+            except (HistoricalDataUnavailable, ValueError, TypeError):
+                timestamp = getattr(candle, "open_time_utc", "unknown")
+                raise HistoricalDataUnavailable(
+                    f"Downloaded candle failed cache validation at {timestamp}"
+                ) from None
             if candle.symbol != first.symbol or candle.interval != first.interval:
                 raise HistoricalDataUnavailable("Mixed candle batch")
             ms = epoch_ms(candle.open_time_utc)
             if step is not None and ms != step:
-                raise HistoricalDataUnavailable("Non-contiguous candle batch")
+                raise HistoricalDataUnavailable(
+                    f"Non-contiguous candle batch at {candle.open_time_utc.isoformat()}"
+                )
             step = ms + INTERVAL_MINUTES[candle.interval] * 60_000
             rows.append((candle.symbol, candle.interval, ms, *(str(x) for x in (
                 candle.open, candle.high, candle.low, candle.close, candle.volume, candle.turnover
@@ -85,7 +93,9 @@ class HistoricalCache:
                     except (InvalidOperation, TypeError):
                         same = False
                     if not same:
-                        raise HistoricalDataUnavailable("Cached candle conflicts with downloaded data")
+                        raise HistoricalDataUnavailable(
+                            f"Cached candle conflicts with downloaded data at {utc_from_ms(row[2]).isoformat()}"
+                        )
                 else:
                     db.execute("""INSERT INTO candles VALUES (?,?,?,?,?,?,?,?,?,?,?)""", row)
             db.execute("""INSERT INTO fetch_batches VALUES (?,?,?,?,?,?,?)
