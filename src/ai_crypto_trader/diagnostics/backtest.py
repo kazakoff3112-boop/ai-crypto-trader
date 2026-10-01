@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 import sqlite3
 
@@ -19,10 +19,11 @@ from ..config import load_settings
 from ..database.historical_cache import HistoricalCache
 from ..market_data.candle import HistoricalDataUnavailable, INTERVAL_MINUTES, utc_from_ms
 from ..market_data.market_regime import (
-    MarketRegimeAnalyzer, REGIMES, RegimeUnavailable, WARMUP_CANDLES,
+    MarketRegimeAnalyzer, MarketRegimeReport, REGIMES, RegimeUnavailable, WARMUP_CANDLES,
 )
 from ..strategies.bollinger_mean_reversion import BollingerMeanReversionStrategy
 from ..strategies.donchian_breakout import DonchianBreakoutStrategy
+from ..strategies.donchian_bull_regime import DonchianBullRegimeStrategy
 from ..strategies.sma_cross import SMACrossoverStrategy
 
 
@@ -76,13 +77,29 @@ def _print_regime_attribution(attribution: RegimeTradeAttribution) -> None:
               f"unrealized P&L {open_.position.unrealized_pnl} USDT")
 
 
+def _load_regime_report(cache: HistoricalCache, evaluation_start: datetime,
+                        evaluation_end: datetime) -> MarketRegimeReport:
+    # The first usable 1h regime is from the hour that closed before this time.
+    hourly_start = evaluation_start.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+    hourly_end = evaluation_end.replace(minute=0, second=0, microsecond=0)
+    hourly_period = BacktestPeriod.create(hourly_start, hourly_end, "1h",
+                                          warmup_candles=WARMUP_CANDLES)
+    hourly_candles = cache.load("BTCUSDT", "1h", hourly_period.warmup_start,
+                                hourly_period.evaluation_end)
+    return MarketRegimeAnalyzer().analyze(
+        hourly_candles, evaluation_start=hourly_period.evaluation_start,
+        evaluation_end=hourly_period.evaluation_end,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Offline backtest; never places trades")
     parser.add_argument("--symbol", required=True, choices=("BTCUSDT", "ETHUSDT"))
     parser.add_argument("--interval", required=True, choices=tuple(INTERVAL_MINUTES))
     parser.add_argument("--strategy", required=True,
                         choices=("no-trade", "buy-once", "buy-then-sell", "sma-cross",
-                                 "donchian-breakout", "bollinger-mean-reversion"))
+                                 "donchian-breakout", "donchian-bull-regime",
+                                 "bollinger-mean-reversion"))
     parser.add_argument("--fast", type=int)
     parser.add_argument("--slow", type=int)
     parser.add_argument("--entry-lookback", type=int)
@@ -99,16 +116,22 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--start and --end must be supplied together")
     if args.strategy != "sma-cross" and any(value is not None for value in (args.fast, args.slow)):
         parser.error("--fast and --slow require --strategy sma-cross")
-    if args.strategy != "donchian-breakout" and any(
+    if args.strategy not in {"donchian-breakout", "donchian-bull-regime"} and any(
         value is not None for value in (args.entry_lookback, args.exit_lookback)
     ):
-        parser.error("Donchian lookbacks require --strategy donchian-breakout")
+        parser.error("Donchian lookbacks require a Donchian strategy")
     if args.strategy != "bollinger-mean-reversion" and any(
         value is not None for value in (args.bollinger_period, args.stddev_multiplier)
     ):
         parser.error("Bollinger parameters require --strategy bollinger-mean-reversion")
-    if args.strategy not in {"sma-cross", "donchian-breakout", "bollinger-mean-reversion"} and args.position_size_pct is not None:
+    if args.strategy not in {"sma-cross", "donchian-breakout", "donchian-bull-regime", "bollinger-mean-reversion"} and args.position_size_pct is not None:
         parser.error("Position size requires a baseline strategy")
+    if args.strategy == "donchian-bull-regime":
+        if args.symbol != "BTCUSDT" or args.interval != "15m" or args.start is None:
+            parser.error("BULL-filtered Donchian requires BTCUSDT 15m and an explicit UTC period")
+        if (args.entry_lookback not in (None, 96) or args.exit_lookback not in (None, 48)
+                or args.position_size_pct not in (None, Decimal("25"))):
+            parser.error("BULL-filtered Donchian parameters are fixed at 96/48/25")
     if args.regime_analysis and (args.symbol != "BTCUSDT" or args.interval != "15m" or args.strategy not in
                                  {"sma-cross", "donchian-breakout", "bollinger-mean-reversion"}):
         parser.error("Regime analysis requires BTCUSDT 15m and a baseline strategy")
@@ -133,6 +156,9 @@ def main(argv: list[str] | None = None) -> int:
                 position_size_pct=(Decimal("25") if args.position_size_pct is None
                                    else args.position_size_pct),
             )
+        elif args.strategy == "donchian-bull-regime":
+            # Used only to determine the unchanged Donchian 15m warm-up length.
+            strategy = DonchianBreakoutStrategy()
         elif args.strategy == "bollinger-mean-reversion":
             strategy = BollingerMeanReversionStrategy(
                 bollinger_period=20 if args.bollinger_period is None else args.bollinger_period,
@@ -161,6 +187,12 @@ def main(argv: list[str] | None = None) -> int:
             step = timedelta(minutes=INTERVAL_MINUTES[args.interval])
             candles = cache.load(args.symbol, args.interval, utc_from_ms(first_ms),
                                  utc_from_ms(last_ms) + step)
+        if args.strategy == "donchian-bull-regime":
+            # Validate the full 1h history, including 223 warm-up candles, before
+            # running the engine. Only a timestamp lookup reaches the strategy.
+            regime_report = _load_regime_report(cache, period.evaluation_start,
+                                                 period.evaluation_end)
+            strategy = DonchianBullRegimeStrategy(regime_report.regime_at)
         execution_config = BacktestConfig.from_settings(settings)
         result = BacktestEngine().run(
             candles, strategy, symbol=args.symbol, interval=args.interval,
@@ -168,17 +200,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         attribution = None
         if args.regime_analysis:
-            # Include the hour ending at/before the first 15m evaluation timestamp.
-            hourly_start = result.evaluation_start.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
-            hourly_end = result.evaluation_end.replace(minute=0, second=0, microsecond=0)
-            hourly_period = BacktestPeriod.create(hourly_start, hourly_end, "1h",
-                                                  warmup_candles=WARMUP_CANDLES)
-            hourly_candles = cache.load("BTCUSDT", "1h", hourly_period.warmup_start,
-                                        hourly_period.evaluation_end)
-            regime_report = MarketRegimeAnalyzer().analyze(
-                hourly_candles, evaluation_start=hourly_period.evaluation_start,
-                evaluation_end=hourly_period.evaluation_end,
-            )
+            regime_report = _load_regime_report(cache, result.evaluation_start,
+                                                 result.evaluation_end)
             attribution = attribute_backtest_by_regime(result, regime_report, interval=args.interval)
         print(f"OFFLINE BACKTEST — {result.strategy_name}")
         print(f"Evaluation period: [{result.evaluation_start.isoformat()}, {result.evaluation_end.isoformat()}) UTC")
@@ -201,7 +224,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Average capital exposure: {result.average_capital_exposure_percent}%")
         print(f"Maximum capital exposure: {result.maximum_capital_exposure_percent}%")
         print(f"Backtest ledger entries: {result.ledger_entries}; no PAPER trades or Bybit calls")
-        if args.strategy in {"sma-cross", "donchian-breakout", "bollinger-mean-reversion"}:
+        if args.strategy == "donchian-bull-regime":
+            stats = strategy.filter_stats
+            print("REGIME FILTER:")
+            print("Entry allowed only in BULL")
+            print("Exit: original Donchian rule, regime-independent")
+            print(f"Raw Donchian BUY signals: {stats.raw_buy_signals}")
+            print(f"Allowed BULL BUY signals: {stats.allowed_bull}")
+            print(f"Blocked BEAR: {stats.blocked_bear}")
+            print(f"Blocked SIDEWAYS: {stats.blocked_sideways}")
+            print(f"Unavailable regime: {stats.unavailable}")
+        if args.strategy in {"sma-cross", "donchian-breakout", "donchian-bull-regime", "bollinger-mean-reversion"}:
             quality = analyze_backtest(result)
             print("TRADE QUALITY")
             print(f"Completed trades: {quality.completed_trade_count}")
