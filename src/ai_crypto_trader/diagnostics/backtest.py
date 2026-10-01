@@ -24,6 +24,7 @@ from ..market_data.market_regime import (
 from ..strategies.bollinger_mean_reversion import BollingerMeanReversionStrategy
 from ..strategies.donchian_breakout import DonchianBreakoutStrategy
 from ..strategies.donchian_bull_regime import DonchianBullRegimeStrategy
+from ..strategies.regime_bull_hold import RegimeBullHoldStrategy
 from ..strategies.sma_cross import SMACrossoverStrategy
 
 
@@ -98,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--interval", required=True, choices=tuple(INTERVAL_MINUTES))
     parser.add_argument("--strategy", required=True,
                         choices=("no-trade", "buy-once", "buy-then-sell", "sma-cross",
-                                 "donchian-breakout", "donchian-bull-regime",
+                                 "donchian-breakout", "donchian-bull-regime", "regime-bull-hold",
                                  "bollinger-mean-reversion"))
     parser.add_argument("--fast", type=int)
     parser.add_argument("--slow", type=int)
@@ -124,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
         value is not None for value in (args.bollinger_period, args.stddev_multiplier)
     ):
         parser.error("Bollinger parameters require --strategy bollinger-mean-reversion")
-    if args.strategy not in {"sma-cross", "donchian-breakout", "donchian-bull-regime", "bollinger-mean-reversion"} and args.position_size_pct is not None:
+    if args.strategy not in {"sma-cross", "donchian-breakout", "donchian-bull-regime", "regime-bull-hold", "bollinger-mean-reversion"} and args.position_size_pct is not None:
         parser.error("Position size requires a baseline strategy")
     if args.strategy == "donchian-bull-regime":
         if args.symbol != "BTCUSDT" or args.interval != "15m" or args.start is None:
@@ -132,6 +133,13 @@ def main(argv: list[str] | None = None) -> int:
         if (args.entry_lookback not in (None, 96) or args.exit_lookback not in (None, 48)
                 or args.position_size_pct not in (None, Decimal("25"))):
             parser.error("BULL-filtered Donchian parameters are fixed at 96/48/25")
+    if args.strategy == "regime-bull-hold":
+        if args.symbol != "BTCUSDT" or args.interval != "1h" or args.start is None:
+            parser.error("1h BULL Regime Hold requires BTCUSDT 1h and an explicit UTC period")
+        if (args.position_size_pct is not None and
+                (not args.position_size_pct.is_finite()
+                 or args.position_size_pct != Decimal("25"))):
+            parser.error("1h BULL Regime Hold position size is fixed at 25%")
     if args.regime_analysis and (args.symbol != "BTCUSDT" or args.interval != "15m" or args.strategy not in
                                  {"sma-cross", "donchian-breakout", "bollinger-mean-reversion"}):
         parser.error("Regime analysis requires BTCUSDT 15m and a baseline strategy")
@@ -159,6 +167,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.strategy == "donchian-bull-regime":
             # Used only to determine the unchanged Donchian 15m warm-up length.
             strategy = DonchianBreakoutStrategy()
+        elif args.strategy == "regime-bull-hold":
+            strategy = None  # Construct only after MarketRegimeAnalyzer validates the cached history.
         elif args.strategy == "bollinger-mean-reversion":
             strategy = BollingerMeanReversionStrategy(
                 bollinger_period=20 if args.bollinger_period is None else args.bollinger_period,
@@ -174,7 +184,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.start is not None:
             period = BacktestPeriod.create(
                 parse_utc(args.start), parse_utc(args.end), args.interval,
-                warmup_candles=strategy.minimum_candles - 2 if hasattr(strategy, "minimum_candles") else 0,
+                warmup_candles=(RegimeBullHoldStrategy.minimum_candles - 2
+                                if args.strategy == "regime-bull-hold" else
+                                strategy.minimum_candles - 2 if hasattr(strategy, "minimum_candles") else 0),
             )
             candles = cache.load(args.symbol, args.interval,
                                  period.warmup_start or period.evaluation_start,
@@ -193,6 +205,14 @@ def main(argv: list[str] | None = None) -> int:
             regime_report = _load_regime_report(cache, period.evaluation_start,
                                                  period.evaluation_end)
             strategy = DonchianBullRegimeStrategy(regime_report.regime_at)
+        elif args.strategy == "regime-bull-hold":
+            # The previous regime is known at evaluation_start. Its classifier
+            # needs 223 earlier hours, so the engine's 224-hour warm-up is exact.
+            regime_report = MarketRegimeAnalyzer().analyze(
+                candles, evaluation_start=period.evaluation_start - timedelta(hours=1),
+                evaluation_end=period.evaluation_end,
+            )
+            strategy = RegimeBullHoldStrategy(regime_report.regime_at)
         execution_config = BacktestConfig.from_settings(settings)
         result = BacktestEngine().run(
             candles, strategy, symbol=args.symbol, interval=args.interval,
@@ -234,7 +254,21 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Blocked BEAR: {stats.blocked_bear}")
             print(f"Blocked SIDEWAYS: {stats.blocked_sideways}")
             print(f"Unavailable regime: {stats.unavailable}")
-        if args.strategy in {"sma-cross", "donchian-breakout", "donchian-bull-regime", "bollinger-mean-reversion"}:
+        if args.strategy == "regime-bull-hold":
+            stats = strategy.transition_stats
+            print("REGIME TRANSITIONS")
+            print("Regime definition: SMA50 / SMA200 / SMA200 slope 24h")
+            print("Entry: non-BULL -> BULL")
+            print("Exit: BULL -> non-BULL")
+            print("Position size: 25%")
+            print(f"Total valid regime transitions: {stats.total_valid_transitions}")
+            print(f"Transitions into BULL: {stats.transitions_into_bull}")
+            print(f"BUY signals generated: {stats.buy_signals}")
+            print(f"Transitions out of BULL: {stats.transitions_out_of_bull}")
+            print(f"SELL signals generated: {stats.sell_signals}")
+            print(f"BULL hours while position open: {stats.bull_hours_while_position_open}")
+            print(f"Skipped unavailable regime: {stats.skipped_unavailable}")
+        if args.strategy in {"sma-cross", "donchian-breakout", "donchian-bull-regime", "regime-bull-hold", "bollinger-mean-reversion"}:
             quality = analyze_backtest(result)
             print("TRADE QUALITY")
             print(f"Completed trades: {quality.completed_trade_count}")
