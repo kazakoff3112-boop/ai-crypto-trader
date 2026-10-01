@@ -187,8 +187,13 @@ class PeriodTests(unittest.TestCase):
                                               "--end", end.isoformat()])
             self.assertEqual(code, 0, output.getvalue())
             for phrase in ("Evaluation period:", "Warm-up period:", "Evaluation candles: 3",
-                           "Warm-up candles: 50", "candles: 3", "Buy & Hold return:"):
+                           "Warm-up candles: 50", "candles: 3", "Matched B&H return:"):
                 self.assertIn(phrase, output.getvalue())
+            matched = run_buy_and_hold(self.data[50:53], symbol="BTCUSDT", interval="1m",
+                                       config=BacktestConfig(), allocation_pct=D("25"))
+            self.assertIn(f"  Final equity: {matched.final_equity} USDT", output.getvalue())
+            self.assertEqual(matched.ledger[0].execution_candle_timestamp_utc,
+                             START + STEP * 51)
             self.assertEqual(history_path.read_bytes(), before_history)
             self.assertEqual(paper_path.read_bytes(), before_paper)
 

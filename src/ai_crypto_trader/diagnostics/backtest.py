@@ -7,9 +7,9 @@ from datetime import timedelta
 from decimal import Decimal
 import sqlite3
 
-from ..backtesting import BacktestConfig, BacktestEngine, BacktestError
-from ..backtesting.analytics import analyze_backtest
-from ..backtesting.benchmark import run_buy_and_hold
+from ..backtesting import BacktestConfig, BacktestEngine, BacktestError, BacktestResult
+from ..backtesting.analytics import BacktestAnalyticsError, analyze_backtest
+from ..backtesting.benchmark import run_buy_and_hold, run_cash_benchmark
 from ..backtesting.periods import BacktestPeriod, parse_utc
 from ..backtesting.test_strategies import BuyOnceStrategy, BuyThenSellStrategy, NoTradeStrategy
 from ..config import load_settings
@@ -21,6 +21,20 @@ from ..strategies.sma_cross import SMACrossoverStrategy
 
 def _usdt(value: Decimal | None) -> str:
     return "N/A" if value is None else f"{value} USDT"
+
+
+def _print_benchmark(label: str, allocation_pct: Decimal, result: BacktestResult,
+                     costs: Decimal) -> None:
+    print(f"{label} — {allocation_pct}% allocation")
+    print(f"  Allocation: {allocation_pct}%")
+    print(f"  Initial capital: {result.initial_capital} USDT")
+    print(f"  Final equity: {result.final_equity} USDT")
+    print(f"  Total P&L: {result.total_pnl} USDT")
+    print(f"  Return: {result.total_return_percent}%")
+    print(f"  Max drawdown: {result.max_drawdown_usdt} USDT ({result.max_drawdown_percent}%)")
+    print(f"  Commission: {result.total_commissions} USDT")
+    print(f"  Slippage: {result.total_slippage} USDT")
+    print(f"  Trading costs: {costs} USDT")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -110,7 +124,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"BUY/SELL: {result.buy_operations} / {result.sell_operations}")
         print(f"Max/min equity: {result.max_equity} / {result.min_equity} USDT")
         print(f"Max drawdown: {result.max_drawdown_usdt} USDT ({result.max_drawdown_percent}%)")
-        print(f"Exposure: {result.exposure_percent}% of closed candles")
+        print(f"Time exposure: {result.time_exposure_percent}% of evaluation candles")
+        print(f"Average capital exposure: {result.average_capital_exposure_percent}%")
+        print(f"Maximum capital exposure: {result.maximum_capital_exposure_percent}%")
         print(f"Backtest ledger entries: {result.ledger_entries}; no PAPER trades or Bybit calls")
         if args.strategy in {"sma-cross", "donchian-breakout"}:
             quality = analyze_backtest(result)
@@ -142,22 +158,39 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Open position (not a completed trade): {quality.open_position.quantity} {args.symbol}; "
                       f"unrealized P&L {quality.open_position.unrealized_pnl} USDT")
             evaluation_candles = candles[result.warmup_candles:]
-            benchmark = run_buy_and_hold(evaluation_candles, symbol=args.symbol, interval=args.interval,
-                                         config=execution_config, initial_capital=result.initial_capital)
-            if (benchmark.evaluation_start != result.evaluation_start
-                    or benchmark.evaluation_end != result.evaluation_end):
-                raise BacktestError("Benchmark evaluation period differs from strategy")
-            benchmark_quality = analyze_backtest(benchmark)
-            print(f"Buy & Hold final equity: {benchmark.final_equity} USDT")
-            print(f"Buy & Hold return: {benchmark.total_return_percent}%")
-            print(f"Buy & Hold max drawdown: {benchmark.max_drawdown_usdt} USDT "
-                  f"({benchmark.max_drawdown_percent}%)")
-            print(f"Buy & Hold trading costs: {benchmark_quality.total_trading_costs} USDT")
-            label = "SMA" if args.strategy == "sma-cross" else "Donchian"
-            print(f"{label} strategy return: {result.total_return_percent}%")
-            print(f"Difference: {result.total_return_percent - benchmark.total_return_percent} percentage points")
+            allocation_pct = strategy.position_size_pct
+            matched = run_buy_and_hold(evaluation_candles, symbol=args.symbol, interval=args.interval,
+                                       config=execution_config, initial_capital=result.initial_capital,
+                                       allocation_pct=allocation_pct)
+            full = run_buy_and_hold(evaluation_candles, symbol=args.symbol, interval=args.interval,
+                                    config=execution_config, initial_capital=result.initial_capital)
+            cash = run_cash_benchmark(evaluation_candles, symbol=args.symbol, interval=args.interval,
+                                      config=execution_config, initial_capital=result.initial_capital)
+            for benchmark in (matched, full, cash):
+                if (benchmark.evaluation_start != result.evaluation_start
+                        or benchmark.evaluation_end != result.evaluation_end
+                        or benchmark.initial_capital != result.initial_capital):
+                    raise BacktestError("Benchmark evaluation period or capital differs from strategy")
+            matched_costs = analyze_backtest(matched).total_trading_costs
+            full_costs = analyze_backtest(full).total_trading_costs
+            cash_costs = analyze_backtest(cash).total_trading_costs
+            print("BENCHMARKS")
+            _print_benchmark("CASH", Decimal("0"), cash, cash_costs)
+            _print_benchmark("MATCHED BUY & HOLD", allocation_pct, matched, matched_costs)
+            _print_benchmark("FULL BUY & HOLD", Decimal("100"), full, full_costs)
+            print("FAIR COMPARISON — strategy vs matched allocation")
+            print(f"Strategy return: {result.total_return_percent}%")
+            print(f"Matched B&H return: {matched.total_return_percent}%")
+            print(f"Difference: {result.total_return_percent - matched.total_return_percent} percentage points")
+            print(f"Strategy max drawdown: {result.max_drawdown_usdt} USDT ({result.max_drawdown_percent}%)")
+            print(f"Matched B&H max drawdown: {matched.max_drawdown_usdt} USDT "
+                  f"({matched.max_drawdown_percent}%)")
+            print(f"Time exposure: {result.time_exposure_percent}%")
+            print(f"Average capital exposure: {result.average_capital_exposure_percent}%")
+            print(f"Maximum capital exposure: {result.maximum_capital_exposure_percent}%")
         return 0
-    except (HistoricalDataUnavailable, BacktestError, sqlite3.Error, OSError, ValueError):
+    except (HistoricalDataUnavailable, BacktestError, BacktestAnalyticsError,
+            sqlite3.Error, OSError, ValueError):
         print("Backtest unavailable: check local cache completeness, configuration and candle integrity.")
         return 1
 

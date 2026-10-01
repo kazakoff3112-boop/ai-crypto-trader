@@ -62,6 +62,8 @@ class SMAEngineeringTests(unittest.TestCase):
         sell = self.strategy.on_candle(self.data[:6], snapshot(cash="750", quantity="1", equity="760"))
         self.assertEqual(sell, Signal("SELL", quantity=D("1")))
         result = self.run_engine()
+        self.assertEqual(result.final_equity, D("916.6666666666666666666666666"))
+        self.assertEqual(result.total_pnl, D("-83.3333333333333333333333334"))
         self.assertEqual([t.side for t in result.ledger], ["BUY", "SELL"])
         self.assertEqual(result.ledger[0].signal_candle_timestamp_utc, START + timedelta(minutes=3))
         self.assertEqual(result.ledger[0].execution_candle_timestamp_utc, START + timedelta(minutes=4))
@@ -70,6 +72,11 @@ class SMAEngineeringTests(unittest.TestCase):
         self.assertEqual(result.strategy_name, "SMA Crossover")
         self.assertEqual(dict(result.strategy_parameters)["position_size_pct"], "25")
         self.assertEqual(result.exposure_percent, D("2") / D("7") * D("100"))
+
+    def test_original_costed_strategy_equity_and_pnl_unchanged(self):
+        result = self.run_engine(config=BacktestConfig())
+        self.assertEqual(result.final_equity, D("916.1674157926031989000504743"))
+        self.assertEqual(result.total_pnl, D("-83.8325842073968010999495257"))
 
     def test_no_repeat_buy_or_sell_without_position(self):
         self.assertEqual(self.strategy.on_candle(self.data[:4], snapshot(quantity="1")), Signal())
@@ -179,7 +186,7 @@ class SMAEngineeringTests(unittest.TestCase):
                                      "--strategy", "sma-cross", "--fast", "2", "--slow", "3",
                                      "--position-size-pct", "25"])
             self.assertEqual(code, 0, output.getvalue())
-            self.assertIn("Buy & Hold return:", output.getvalue())
+            self.assertIn("Matched B&H return:", output.getvalue())
             self.assertIn("Difference:", output.getvalue())
             self.assertEqual(historical.read_bytes(), before_history)
             self.assertEqual(paper.read_bytes(), before_paper)

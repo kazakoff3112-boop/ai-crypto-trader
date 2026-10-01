@@ -63,6 +63,7 @@ class BacktestTrade:
 class EquityPoint:
     timestamp_utc: datetime
     equity: Decimal
+    capital_exposure_percent: Decimal = ZERO
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,13 @@ class BacktestResult:
     warmup_start: datetime | None
     warmup_candles: int
     evaluation_candles: int
+    average_capital_exposure_percent: Decimal
+    maximum_capital_exposure_percent: Decimal
+
+    @property
+    def time_exposure_percent(self) -> Decimal:
+        """Fraction of evaluation candles with an open position."""
+        return self.exposure_percent
 
 
 class BacktestEngine:
@@ -172,6 +180,8 @@ class BacktestEngine:
         max_drawdown = ZERO
         max_drawdown_pct = ZERO
         exposed_candles = 0
+        capital_exposure_sum = ZERO
+        maximum_capital_exposure = ZERO
 
         for index in range(period.warmup_candles, len(history)):
             candle = history[index]
@@ -206,9 +216,17 @@ class BacktestEngine:
                 pending = None
 
             equity = portfolio.equity({safe.symbol: candle.close})
-            if portfolio.quantity(safe.symbol) > ZERO:
+            position_value = portfolio.quantity(safe.symbol) * candle.close
+            if equity <= ZERO:
+                raise BacktestError("Non-positive equity prevents capital exposure calculation")
+            capital_exposure = position_value / equity * Decimal("100")
+            if not capital_exposure.is_finite() or not ZERO <= capital_exposure <= Decimal("100"):
+                raise BacktestError("Invalid capital exposure")
+            capital_exposure_sum += capital_exposure
+            maximum_capital_exposure = max(maximum_capital_exposure, capital_exposure)
+            if position_value > ZERO:
                 exposed_candles += 1
-            curve.append(EquityPoint(candle.close_time_utc, equity))
+            curve.append(EquityPoint(candle.close_time_utc, equity, capital_exposure))
             maximum = max(maximum, equity)
             minimum = min(minimum, equity)
             peak = max(peak, equity)
@@ -245,6 +263,8 @@ class BacktestEngine:
             safe.symbol, portfolio.cash, portfolio.quantity(safe.symbol), history[-1].close,
             period.evaluation_start, period.evaluation_end,
             period.warmup_start, period.warmup_candles, period.evaluation_candles,
+            capital_exposure_sum / Decimal(period.evaluation_candles),
+            maximum_capital_exposure,
         )
 
     @staticmethod

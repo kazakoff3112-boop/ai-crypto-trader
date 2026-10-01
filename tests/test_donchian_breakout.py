@@ -138,6 +138,14 @@ class DonchianTests(unittest.TestCase):
         self.assertEqual(report.total_slippage, result.total_slippage)
         self.assertEqual(report.total_traded_notional, buy.gross_value + sell.gross_value)
 
+    def test_original_strategy_equity_and_pnl_unchanged(self):
+        result = self.run_engine()
+        self.assertEqual(result.final_equity, D("837.5"))
+        self.assertEqual(result.total_pnl, D("-162.5"))
+        costed = self.run_engine(config=BacktestConfig())
+        self.assertEqual(costed.final_equity, D("837.2378932911166794225264991"))
+        self.assertEqual(costed.total_pnl, D("-162.7621067088833205774735009"))
+
     def test_invalid_lookbacks_size_and_history_fail_closed(self):
         for entry, exit_, pct in ((0, 48, D("25")), (-1, 48, D("25")),
                                   (96, 0, D("25")), (96, -1, D("25")),
@@ -198,7 +206,8 @@ class DonchianTests(unittest.TestCase):
                     for phrase in ("entry_lookback=96", "exit_lookback=48", "position_size_pct=25",
                                    "TRADE QUALITY", "Completed trades:", "Profit factor:",
                                    "Turnover:", "P&L before costs:", "P&L after costs:",
-                                   "Buy & Hold return:", "Buy & Hold max drawdown:"):
+                                   "MATCHED BUY & HOLD — 25% allocation",
+                                   "FULL BUY & HOLD — 100% allocation", "Matched B&H max drawdown:"):
                         self.assertIn(phrase, output.getvalue())
             self.assertEqual(history_path.read_bytes(), history_before)
             self.assertEqual(paper_path.read_bytes(), paper_before)

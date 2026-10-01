@@ -226,8 +226,8 @@ class BacktestAnalyticsTests(unittest.TestCase):
             for phrase in ("TRADE QUALITY", "Completed trades:", "Wins:", "Losses:",
                            "Win rate:", "Profit factor:",
                            "P&L before costs:", "Trading costs:", "P&L after costs:",
-                           "Buy & Hold final equity:", "Buy & Hold max drawdown:",
-                           "Buy & Hold trading costs:"):
+                           "BENCHMARKS", "MATCHED BUY & HOLD — 25% allocation",
+                           "FULL BUY & HOLD — 100% allocation", "FAIR COMPARISON"):
                 self.assertIn(phrase, output.getvalue())
             self.assertEqual(history_path.read_bytes(), history_before)
             self.assertEqual(paper_path.read_bytes(), paper_before)
