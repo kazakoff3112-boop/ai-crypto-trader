@@ -193,20 +193,20 @@ class HistoricalTests(unittest.TestCase):
         for name in ("create_order", "place_order", "amend_order", "cancel_order", "submit_order"):
             self.assertFalse(hasattr(self.bybit, name))
 
-    def test_download_days_accepts_1_400_500_600_without_network(self):
+    def test_download_days_accepts_existing_and_new_boundaries_without_network(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "history.sqlite3"
             with patch.dict("os.environ", {"HISTORICAL_CACHE_PATH": str(path)}):
                 with patch.object(HistoricalMarketDataClient, "fetch_candles", return_value=[]) as fetch:
-                    for days in (1, 400, 500, 600):
+                    for days in (1, 400, 500, 600, 740, 800):
                         with self.subTest(days=days):
                             self.assertEqual(main(["--symbol", "BTCUSDT", "--interval", "1h",
                                                    "--days", str(days)]), 0)
-                    self.assertEqual(fetch.call_count, 4)
+                    self.assertEqual(fetch.call_count, 6)
 
-    def test_download_days_rejects_zero_and_601_before_network(self):
+    def test_download_days_rejects_zero_and_801_before_network(self):
         with patch.object(HistoricalMarketDataClient, "fetch_candles") as fetch:
-            for days in (0, 601):
+            for days in (0, 801):
                 with self.subTest(days=days), self.assertRaises(SystemExit) as caught:
                     main(["--symbol", "BTCUSDT", "--interval", "1h", "--days", str(days)])
                 self.assertEqual(caught.exception.code, 2)
