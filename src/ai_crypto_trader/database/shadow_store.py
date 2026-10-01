@@ -70,6 +70,23 @@ _COLUMNS = ("decision_id", "strategy_name", "strategy_version", "symbol", "timef
             "software_version")
 
 
+def _values(decision: ShadowDecision) -> tuple:
+    values = (
+        decision.decision_id, decision.strategy_name, decision.strategy_version,
+        decision.symbol, decision.timeframe, decision.candle_close_utc.isoformat(),
+        decision.decision_utc.isoformat(),
+        *(str(value) for value in (decision.open, decision.high, decision.low, decision.close)),
+        decision.current_regime.value, decision.previous_regime.value,
+        decision.action, decision.reason,
+        *(str(value) for value in (decision.sma50, decision.sma200,
+                                   decision.previous_sma200)),
+        decision.state_before, decision.state_after,
+        int(decision.position_would_be_open), decision.software_version,
+    )
+    _read(values)  # Validate the exact on-disk representation before INSERT.
+    return values
+
+
 def _utc(value: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value)
@@ -218,23 +235,35 @@ class ShadowStore:
                 if decision.state_before != status.state:
                     raise ShadowUnavailable("Shadow state changed before decision was stored")
                 _validate_chain([*history, decision])
-                values = (
-                    decision.decision_id, decision.strategy_name, decision.strategy_version,
-                    decision.symbol, decision.timeframe, decision.candle_close_utc.isoformat(),
-                    decision.decision_utc.isoformat(),
-                    *(str(value) for value in (decision.open, decision.high, decision.low, decision.close)),
-                    decision.current_regime.value, decision.previous_regime.value,
-                    decision.action, decision.reason,
-                    *(str(value) for value in (decision.sma50, decision.sma200,
-                                               decision.previous_sma200)),
-                    decision.state_before, decision.state_after,
-                    int(decision.position_would_be_open), decision.software_version,
-                )
-                _read(values)  # Validate exact on-disk representation before INSERT.
+                values = _values(decision)
                 db.execute(f"INSERT INTO shadow_decisions ({', '.join(_COLUMNS)}) "
                            f"VALUES ({', '.join('?' for _ in _COLUMNS)})", values)
                 db.commit()
                 return True, _validate_chain([*history, decision])
+            except Exception:
+                db.rollback()
+                raise
+
+    def append_batch(self, decisions: tuple[ShadowDecision, ...], *,
+                     expected_status: ShadowStatus) -> ShadowStatus:
+        """Atomically append one prevalidated, chronological catch-up batch."""
+        if not decisions:
+            raise ShadowUnavailable("Catch-up batch is empty")
+        with closing(sqlite3.connect(self.path, timeout=10)) as db:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                history, status = self._history(db)
+                if status != expected_status:
+                    raise ShadowUnavailable("Shadow state changed after catch-up preview")
+                candidate = [*history, *decisions]
+                updated = _validate_chain(candidate)
+                values = [_values(decision) for decision in decisions]
+                db.executemany(
+                    f"INSERT INTO shadow_decisions ({', '.join(_COLUMNS)}) "
+                    f"VALUES ({', '.join('?' for _ in _COLUMNS)})", values,
+                )
+                db.commit()
+                return updated
             except Exception:
                 db.rollback()
                 raise
