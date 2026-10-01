@@ -13,6 +13,8 @@ from ..market_data.historical import (
     HistoricalDataUnavailable, HistoricalMarketDataClient, INTERVAL_MINUTES, utc_from_ms,
 )
 
+MAX_DOWNLOAD_DAYS = 400
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Bybit Demo public spot candle history")
@@ -23,8 +25,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not args.offline_summary and (args.symbol is None or args.interval is None or args.days is None):
         parser.error("download requires --symbol, --interval and --days")
-    if args.days is not None and not 1 <= args.days <= 365:
-        parser.error("--days must be between 1 and 365")
+    if args.days is not None and not 1 <= args.days <= MAX_DOWNLOAD_DAYS:
+        parser.error(f"--days must be between 1 and {MAX_DOWNLOAD_DAYS}")
     try:
         settings = load_settings()
         cache = HistoricalCache(settings.historical_cache_path)
