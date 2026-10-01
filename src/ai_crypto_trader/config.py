@@ -48,6 +48,7 @@ class Settings:
     max_manual_price_change_bps: Decimal = Decimal("10")
     database_path: Path = Path("data/ai_crypto_trader.sqlite3")
     historical_cache_path: Path = Path("data/historical_market_data.sqlite3")
+    shadow_database_path: Path = Path("data/shadow_trading.sqlite3")
     backtest_position_size_pct: Decimal = Decimal("25")
 
     def __post_init__(self) -> None:
@@ -59,8 +60,9 @@ class Settings:
             raise ValueError("Invalid Bybit Demo URL")
         if self.allowed_symbols != ALLOWED_SYMBOLS or self.allowed_categories != ALLOWED_CATEGORIES:
             raise ValueError("Safety allowlists cannot be overridden")
-        if self.database_path.resolve() == self.historical_cache_path.resolve():
-            raise ValueError("Historical cache must be separate from the trade ledger database")
+        if len({self.database_path.resolve(), self.historical_cache_path.resolve(),
+                self.shadow_database_path.resolve()}) != 3:
+            raise ValueError("Paper ledger, historical cache and shadow database must be separate")
         if self.initial_capital_usdt != Decimal("1000"):
             raise ValueError("Internal starting capital must be 1000 USDT")
         if not self.spot_fee_rate.is_finite() or self.spot_fee_rate < 0 or self.spot_fee_rate >= 1:
@@ -101,5 +103,6 @@ def load_settings(dotenv_path: str | Path = ".env", environ: Mapping[str, str] |
         ),
         database_path=Path(source.get("DATABASE_PATH", "data/ai_crypto_trader.sqlite3")),
         historical_cache_path=Path(source.get("HISTORICAL_CACHE_PATH", "data/historical_market_data.sqlite3")),
+        shadow_database_path=Path(source.get("SHADOW_DATABASE_PATH", "data/shadow_trading.sqlite3")),
         backtest_position_size_pct=Decimal(source.get("BACKTEST_POSITION_SIZE_PCT", "25")),
     )
