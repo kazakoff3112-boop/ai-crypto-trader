@@ -1,6 +1,6 @@
 # AI Crypto Trader
 
-Безопасный фундамент локального Python-проекта для будущей **Bybit Demo SPOT** торговли. SMA и Donchian baseline существуют только для офлайн-backtest; система не умеет отправлять ордера.
+Безопасный фундамент локального Python-проекта для будущей **Bybit Demo SPOT** торговли. SMA, Donchian и Bollinger baseline существуют только для офлайн-backtest; система не умеет отправлять ордера.
 
 ## Границы безопасности
 
@@ -22,7 +22,7 @@ src/ai_crypto_trader/
                          и отдельные исторические OHLCV-свечи
   diagnostics/           ручная проверка подключения
   trading_engine/        безопасный Paper Trading Engine
-  strategies/            SMA и Donchian baseline только для офлайн-backtest
+  strategies/            SMA, Donchian и Bollinger baseline только для офлайн-backtest
   risk_management/       заготовка риск-менеджмента
   portfolio/             виртуальный Portfolio и append-only Ledger
   database/              SQLite-хранилище и последовательные миграции
@@ -149,7 +149,7 @@ python -m ai_crypto_trader.diagnostics.historical_data --offline-summary
 
 ## Изолированный backtest
 
-Backtest — проверка технических правил на уже сохранённой истории. Он **не** использует текущий PAPER Portfolio, торговый Ledger, API-ключи или сеть: каждый запуск создаёт новый in-memory Portfolio с `1000 USDT` (либо явно заданным тестовым капиталом). Исторический кэш открывается только для чтения. На этом этапе доступны исключительно технические фикстуры `no-trade`, `buy-once` и `buy-then-sell`; это не торговые стратегии и не инвестиционные рекомендации.
+Backtest — проверка технических правил на уже сохранённой истории. Он **не** использует текущий PAPER Portfolio, торговый Ledger, API-ключи или сеть: каждый запуск создаёт новый in-memory Portfolio с `1000 USDT` (либо явно заданным тестовым капиталом). Исторический кэш открывается только для чтения. Технические фикстуры `no-trade`, `buy-once` и `buy-then-sell` нужны лишь для проверки движка; отдельные SMA, Donchian и Bollinger baseline не являются инвестиционными рекомендациями.
 
 После закрытия свечи N фикстура видит только её и предыдущие закрытые свечи, а также неизменяемый снимок виртуального Portfolio. Сигнал BUY/SELL исполняется на **открытии свечи N+1**, никогда по close свечи N. Сигнал последней свечи не исполняется. Это защищает от *look-ahead bias* — использования информации, которая в момент решения ещё не была известна. Вся входная история должна быть непрерывной, по порядку и уже закрытой; иначе запуск отклоняется.
 
@@ -195,9 +195,25 @@ python -m ai_crypto_trader.diagnostics.backtest --symbol BTCUSDT --interval 15m 
 
 Все три параметра можно опустить: по умолчанию Donchian использует именно `96/48/25`. Покупка расходует не более 25% меньшего из доступного USDT и equity; размер количества пересчитывается на следующем `open` с существующими комиссией и slippage. Применяются тот же `TRADE QUALITY` и три benchmark, что у SMA. Данные берутся только из локального read-only кэша; реальных и PAPER-сделок команда не выполняет.
 
+## Bollinger Mean Reversion: третий независимый baseline
+
+Полосы Боллинджера измеряют, насколько цена закрытия отклонилась от среднего. Для последних **20 полностью закрытых** свечей middle = среднее `close`, population variance = `Σ(closeᵢ − middle)² / 20`, stddev = `√variance`, upper = `middle + 2 × stddev`, lower = `middle − 2 × stddev`. Все вычисления выполняются через `Decimal`, без pandas, numpy и float. Если все цены одинаковы, stddev равен нулю и обе полосы совпадают с middle — это допустимо и само по себе не создаёт BUY.
+
+Mean reversion означает проверку идеи о возврате цены к среднему после сильного отклонения. Без позиции BUY появляется, только если `close` текущей закрытой свечи **строго ниже** её lower band. С открытой позицией SELL закрывает её целиком, когда `close ≥ middle band`. Равенство lower band не даёт BUY. Сигнал на свече N исполняется только по `open` свечи N+1; будущие свечи не участвуют в расчёте. При явном evaluation period 19 предыдущих свечей служат только warm-up для первого 20-свечного окна: сделок, equity curve и P&L в warm-up нет.
+
+BUY использует существующий лимит **25%** от меньшего из свободного USDT и текущей equity; комиссия и slippage действуют по общей модели backtest, без повторного списания. В отличие от SMA crossover и Donchian breakout, это baseline возврата к среднему, а не следования тренду. Параметры `20/2/25` зафиксированы заранее, а не выбраны по уже просмотренным результатам; optimizer отсутствует. Положительный исторический backtest не доказывает будущую прибыль, а подстройка параметров после просмотра истории разрушила бы независимость проверки.
+
+Ручной офлайн-прогон BTCUSDT 15m (самостоятельно проект его не запускает):
+
+```bash
+python -m ai_crypto_trader.diagnostics.backtest --symbol BTCUSDT --interval 15m --strategy bollinger-mean-reversion --bollinger-period 20 --stddev-multiplier 2 --position-size-pct 25
+```
+
+Команда также принимает существующие `--start` и `--end` для заранее выбранного evaluation period. Отчёт повторно использует `TRADE QUALITY`, Cash, matched 25% и full 100% Buy & Hold, а также time/capital exposure. Бумажный Portfolio и исторический кэш не изменяются.
+
 ## Диагностика качества сделок
 
-После SMA или Donchian результата CLI показывает `TRADE QUALITY`. Завершённая long-only сделка — один BUY и следующий полностью закрывающий SELL; незакрытая позиция показана отдельно и не участвует в win rate. Для завершённой сделки `gross P&L до издержек = gross SELL по execution − gross BUY по execution + slippage BUY + slippage SELL`. `Net P&L = gross SELL − gross BUY − комиссии BUY/SELL`, что равно `gross P&L до издержек − комиссии − slippage`: ухудшение цены уже включено в execution и второй раз не списывается. Доходность отдельной сделки делится на фактически выделенный капитал `gross BUY + комиссия BUY`.
+После результата SMA, Donchian или Bollinger CLI показывает `TRADE QUALITY`. Завершённая long-only сделка — один BUY и следующий полностью закрывающий SELL; незакрытая позиция показана отдельно и не участвует в win rate. Для завершённой сделки `gross P&L до издержек = gross SELL по execution − gross BUY по execution + slippage BUY + slippage SELL`. `Net P&L = gross SELL − gross BUY − комиссии BUY/SELL`, что равно `gross P&L до издержек − комиссии − slippage`: ухудшение цены уже включено в execution и второй раз не списывается. Доходность отдельной сделки делится на фактически выделенный капитал `gross BUY + комиссия BUY`.
 
 Win rate — доля завершённых сделок с положительным net P&L; profit factor — сумма прибылей победителей / абсолютная сумма убытков проигравших. Если проигравших нет, profit factor выводится как `N/A`, а не вымышленное число. Turnover — сумма gross-номиналов всех BUY и SELL, включая BUY ещё открытой позиции. Время удержания измеряется между timestamp исполнения BUY и SELL.
 

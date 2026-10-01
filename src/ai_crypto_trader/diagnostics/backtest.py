@@ -15,6 +15,7 @@ from ..backtesting.test_strategies import BuyOnceStrategy, BuyThenSellStrategy, 
 from ..config import load_settings
 from ..database.historical_cache import HistoricalCache
 from ..market_data.candle import HistoricalDataUnavailable, INTERVAL_MINUTES, utc_from_ms
+from ..strategies.bollinger_mean_reversion import BollingerMeanReversionStrategy
 from ..strategies.donchian_breakout import DonchianBreakoutStrategy
 from ..strategies.sma_cross import SMACrossoverStrategy
 
@@ -42,11 +43,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--symbol", required=True, choices=("BTCUSDT", "ETHUSDT"))
     parser.add_argument("--interval", required=True, choices=tuple(INTERVAL_MINUTES))
     parser.add_argument("--strategy", required=True,
-                        choices=("no-trade", "buy-once", "buy-then-sell", "sma-cross", "donchian-breakout"))
+                        choices=("no-trade", "buy-once", "buy-then-sell", "sma-cross",
+                                 "donchian-breakout", "bollinger-mean-reversion"))
     parser.add_argument("--fast", type=int)
     parser.add_argument("--slow", type=int)
     parser.add_argument("--entry-lookback", type=int)
     parser.add_argument("--exit-lookback", type=int)
+    parser.add_argument("--bollinger-period", type=int)
+    parser.add_argument("--stddev-multiplier", type=Decimal)
     parser.add_argument("--position-size-pct", type=Decimal)
     parser.add_argument("--start", help="inclusive ISO 8601 UTC candle open")
     parser.add_argument("--end", help="exclusive ISO 8601 UTC candle open")
@@ -59,7 +63,11 @@ def main(argv: list[str] | None = None) -> int:
         value is not None for value in (args.entry_lookback, args.exit_lookback)
     ):
         parser.error("Donchian lookbacks require --strategy donchian-breakout")
-    if args.strategy not in {"sma-cross", "donchian-breakout"} and args.position_size_pct is not None:
+    if args.strategy != "bollinger-mean-reversion" and any(
+        value is not None for value in (args.bollinger_period, args.stddev_multiplier)
+    ):
+        parser.error("Bollinger parameters require --strategy bollinger-mean-reversion")
+    if args.strategy not in {"sma-cross", "donchian-breakout", "bollinger-mean-reversion"} and args.position_size_pct is not None:
         parser.error("Position size requires a baseline strategy")
     fixtures = {
         "no-trade": NoTradeStrategy,
@@ -79,6 +87,14 @@ def main(argv: list[str] | None = None) -> int:
             strategy = DonchianBreakoutStrategy(
                 entry_lookback=96 if args.entry_lookback is None else args.entry_lookback,
                 exit_lookback=48 if args.exit_lookback is None else args.exit_lookback,
+                position_size_pct=(Decimal("25") if args.position_size_pct is None
+                                   else args.position_size_pct),
+            )
+        elif args.strategy == "bollinger-mean-reversion":
+            strategy = BollingerMeanReversionStrategy(
+                bollinger_period=20 if args.bollinger_period is None else args.bollinger_period,
+                stddev_multiplier=(Decimal("2") if args.stddev_multiplier is None
+                                   else args.stddev_multiplier),
                 position_size_pct=(Decimal("25") if args.position_size_pct is None
                                    else args.position_size_pct),
             )
@@ -128,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Average capital exposure: {result.average_capital_exposure_percent}%")
         print(f"Maximum capital exposure: {result.maximum_capital_exposure_percent}%")
         print(f"Backtest ledger entries: {result.ledger_entries}; no PAPER trades or Bybit calls")
-        if args.strategy in {"sma-cross", "donchian-breakout"}:
+        if args.strategy in {"sma-cross", "donchian-breakout", "bollinger-mean-reversion"}:
             quality = analyze_backtest(result)
             print("TRADE QUALITY")
             print(f"Completed trades: {quality.completed_trade_count}")
