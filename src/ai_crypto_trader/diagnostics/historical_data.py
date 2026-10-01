@@ -13,7 +13,7 @@ from ..market_data.historical import (
     HistoricalDataUnavailable, HistoricalMarketDataClient, INTERVAL_MINUTES, utc_from_ms,
 )
 
-MAX_DOWNLOAD_DAYS = 800
+MAX_DOWNLOAD_DAYS = 950
 
 
 def main(argv: list[str] | None = None) -> int:
