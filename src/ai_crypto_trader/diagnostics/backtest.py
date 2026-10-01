@@ -11,10 +11,16 @@ from ..backtesting import BacktestConfig, BacktestEngine, BacktestError, Backtes
 from ..backtesting.analytics import BacktestAnalyticsError, analyze_backtest
 from ..backtesting.benchmark import run_buy_and_hold, run_cash_benchmark
 from ..backtesting.periods import BacktestPeriod, parse_utc
+from ..backtesting.regime_attribution import (
+    RegimeAttributionUnavailable, RegimeTradeAttribution, attribute_backtest_by_regime,
+)
 from ..backtesting.test_strategies import BuyOnceStrategy, BuyThenSellStrategy, NoTradeStrategy
 from ..config import load_settings
 from ..database.historical_cache import HistoricalCache
 from ..market_data.candle import HistoricalDataUnavailable, INTERVAL_MINUTES, utc_from_ms
+from ..market_data.market_regime import (
+    MarketRegimeAnalyzer, REGIMES, RegimeUnavailable, WARMUP_CANDLES,
+)
 from ..strategies.bollinger_mean_reversion import BollingerMeanReversionStrategy
 from ..strategies.donchian_breakout import DonchianBreakoutStrategy
 from ..strategies.sma_cross import SMACrossoverStrategy
@@ -38,6 +44,38 @@ def _print_benchmark(label: str, allocation_pct: Decimal, result: BacktestResult
     print(f"  Trading costs: {costs} USDT")
 
 
+def _print_regime_attribution(attribution: RegimeTradeAttribution) -> None:
+    print("REGIME TRADE ATTRIBUTION")
+    print("Grouping: ENTRY SIGNAL REGIME; shares use completed entries only")
+    for regime in REGIMES:
+        group = attribution.group_for(regime)
+        print(f"ENTRY REGIME: {regime.value}")
+        print(f"  Completed trades: {group.completed_trades}; entries: {group.entry_share_percent}%")
+        print(f"  Wins / losses: {group.winning_trades} / {group.losing_trades}")
+        print(f"  Win rate: {group.win_rate_percent}%")
+        print(f"  Gross profit / loss: {group.gross_profit} / {group.gross_loss} USDT")
+        print(f"  Profit factor: {group.profit_factor if group.profit_factor is not None else 'N/A'}")
+        print(f"  Net P&L: {group.total_net_pnl} USDT")
+        print(f"  P&L before costs: {group.pnl_before_costs} USDT")
+        print(f"  Commission / slippage: {group.commissions} / {group.slippage} USDT")
+        print(f"  Trading costs: {group.total_costs} USDT")
+        print(f"  Average trade / median trade: {_usdt(group.average_net_pnl)} / "
+              f"{_usdt(group.median_net_pnl)}")
+        print(f"  Average winner / loser: {_usdt(group.average_winner)} / "
+              f"{_usdt(group.average_loser)}")
+        print(f"  Average holding time: {group.average_holding_time or 'N/A'}")
+        print(f"  Turnover: {group.total_turnover} USDT")
+    print("ENTRY -> EXIT REGIME MATRIX (signal-time regimes)")
+    for item in attribution.transitions:
+        print(f"  {item.entry_signal_regime.value} -> {item.exit_signal_regime.value}: "
+              f"{item.trade_count} trades; net P&L {item.total_net_pnl} USDT")
+    if attribution.open_position is not None:
+        open_ = attribution.open_position
+        print(f"Open position (excluded from completed trades): entry signal "
+              f"{open_.entry_signal_regime.value}; entry execution {open_.entry_execution_regime.value}; "
+              f"unrealized P&L {open_.position.unrealized_pnl} USDT")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Offline backtest; never places trades")
     parser.add_argument("--symbol", required=True, choices=("BTCUSDT", "ETHUSDT"))
@@ -54,6 +92,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--position-size-pct", type=Decimal)
     parser.add_argument("--start", help="inclusive ISO 8601 UTC candle open")
     parser.add_argument("--end", help="exclusive ISO 8601 UTC candle open")
+    parser.add_argument("--regime-analysis", action="store_true",
+                        help="read-only attribution using local BTCUSDT 1h regimes")
     args = parser.parse_args(argv)
     if (args.start is None) != (args.end is None):
         parser.error("--start and --end must be supplied together")
@@ -69,6 +109,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("Bollinger parameters require --strategy bollinger-mean-reversion")
     if args.strategy not in {"sma-cross", "donchian-breakout", "bollinger-mean-reversion"} and args.position_size_pct is not None:
         parser.error("Position size requires a baseline strategy")
+    if args.regime_analysis and (args.symbol != "BTCUSDT" or args.interval != "15m" or args.strategy not in
+                                 {"sma-cross", "donchian-breakout", "bollinger-mean-reversion"}):
+        parser.error("Regime analysis requires BTCUSDT 15m and a baseline strategy")
     fixtures = {
         "no-trade": NoTradeStrategy,
         "buy-once": BuyOnceStrategy,
@@ -123,6 +166,20 @@ def main(argv: list[str] | None = None) -> int:
             candles, strategy, symbol=args.symbol, interval=args.interval,
             config=execution_config, period=period,
         )
+        attribution = None
+        if args.regime_analysis:
+            # Include the hour ending at/before the first 15m evaluation timestamp.
+            hourly_start = result.evaluation_start.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+            hourly_end = result.evaluation_end.replace(minute=0, second=0, microsecond=0)
+            hourly_period = BacktestPeriod.create(hourly_start, hourly_end, "1h",
+                                                  warmup_candles=WARMUP_CANDLES)
+            hourly_candles = cache.load("BTCUSDT", "1h", hourly_period.warmup_start,
+                                        hourly_period.evaluation_end)
+            regime_report = MarketRegimeAnalyzer().analyze(
+                hourly_candles, evaluation_start=hourly_period.evaluation_start,
+                evaluation_end=hourly_period.evaluation_end,
+            )
+            attribution = attribute_backtest_by_regime(result, regime_report, interval=args.interval)
         print(f"OFFLINE BACKTEST — {result.strategy_name}")
         print(f"Evaluation period: [{result.evaluation_start.isoformat()}, {result.evaluation_end.isoformat()}) UTC")
         print(f"Warm-up period: [{result.warmup_start.isoformat()}, {result.evaluation_start.isoformat()}) UTC"
@@ -204,8 +261,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Time exposure: {result.time_exposure_percent}%")
             print(f"Average capital exposure: {result.average_capital_exposure_percent}%")
             print(f"Maximum capital exposure: {result.maximum_capital_exposure_percent}%")
+            if attribution is not None:
+                _print_regime_attribution(attribution)
         return 0
     except (HistoricalDataUnavailable, BacktestError, BacktestAnalyticsError,
+            RegimeUnavailable, RegimeAttributionUnavailable,
             sqlite3.Error, OSError, ValueError):
         print("Backtest unavailable: check local cache completeness, configuration and candle integrity.")
         return 1
