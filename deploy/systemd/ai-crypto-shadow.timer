@@ -1,0 +1,11 @@
+[Unit]
+Description=Retry AI Crypto Trader shadow observation every 10 minutes
+
+[Timer]
+OnCalendar=*-*-* *:00/10:00
+AccuracySec=1min
+Persistent=false
+Unit=ai-crypto-shadow.service
+
+[Install]
+WantedBy=timers.target

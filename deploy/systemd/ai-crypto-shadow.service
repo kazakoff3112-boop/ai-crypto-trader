@@ -1,0 +1,23 @@
+[Unit]
+Description=AI Crypto Trader read-only shadow observation (one closed BTCUSDT hour)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ai-crypto-shadow
+Group=ai-crypto-shadow
+WorkingDirectory=/opt/ai-crypto-trader
+ExecStartPre=/usr/bin/test -s /opt/ai-crypto-trader/data/shadow_trading.sqlite3
+ExecStartPre=/opt/ai-crypto-trader/.venv/bin/python -m ai_crypto_trader.diagnostics.shadow_runner --status --require-baseline
+ExecStart=/opt/ai-crypto-trader/.venv/bin/python -m ai_crypto_trader.diagnostics.shadow_runner --once
+SuccessExitStatus=10 75
+Restart=no
+TimeoutStartSec=300
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ai-crypto-trader/data

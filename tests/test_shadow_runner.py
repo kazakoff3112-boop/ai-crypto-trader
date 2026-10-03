@@ -14,7 +14,7 @@ from unittest.mock import patch
 from ai_crypto_trader.bybit.client import BybitReadOnlyClient
 from ai_crypto_trader.config import Settings
 from ai_crypto_trader.database.shadow_store import ShadowStore, ShadowUnavailable
-from ai_crypto_trader.diagnostics.shadow_runner import main
+from ai_crypto_trader.diagnostics.shadow_runner import ShadowExitCode, main
 from ai_crypto_trader.market_data.candle import Candle, HistoricalDataUnavailable
 from ai_crypto_trader.market_data.historical import HistoricalMarketDataClient
 from ai_crypto_trader.market_data.market_regime import RegimeUnavailable
@@ -205,11 +205,11 @@ class ShadowTests(unittest.TestCase):
                                       side_effect=mocked_candles) as fetch:
                         first_output = StringIO()
                         with redirect_stdout(first_output):
-                            self.assertEqual(main(["--once"]), 0)
+                            self.assertEqual(main(["--once"]), ShadowExitCode.SUCCESS_NEW_DECISION)
                         self.assertIn("Result: BUY_SIGNAL", first_output.getvalue())
                         second_output = StringIO()
                         with redirect_stdout(second_output):
-                            self.assertEqual(main(["--once"]), 0)
+                            self.assertEqual(main(["--once"]), ShadowExitCode.SUCCESS_ALREADY_PROCESSED)
                         self.assertIn("Result: ALREADY_PROCESSED", second_output.getvalue())
                         self.assertEqual(fetch.call_count, 1)
             self.assertEqual(ShadowStore(shadow_path).status().processed, 1)

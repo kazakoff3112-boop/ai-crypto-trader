@@ -9,7 +9,8 @@ from typing import Callable
 
 from ..backtesting.strategy import PortfolioSnapshot
 from ..database.shadow_store import (
-    HOUR, ShadowDecision, ShadowStatus, ShadowStore, ShadowUnavailable, new_decision,
+    HOUR, ShadowDecision, ShadowGapUnavailable, ShadowStatus, ShadowStore,
+    ShadowUnavailable, new_decision,
 )
 from ..market_data.historical import HistoricalMarketDataClient
 from ..market_data.market_regime import (
@@ -120,7 +121,7 @@ class ShadowRunner:
         if status.last_candle_utc == end:
             return ShadowRunResult(False, "ALREADY_PROCESSED", status)
         if status.last_candle_utc is not None and end != status.last_candle_utc + HOUR:
-            raise ShadowUnavailable("Gap or clock reversal; controlled catch-up required")
+            raise ShadowGapUnavailable("Gap or clock reversal; controlled catch-up required")
         start = end - REQUIRED_HOURS * HOUR
         candles = self._market.fetch_candles("BTCUSDT", "1h", start, end,
                                               category="spot", completed_only=True)

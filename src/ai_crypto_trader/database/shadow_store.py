@@ -26,6 +26,10 @@ class ShadowUnavailable(RuntimeError):
     """Shadow history or current data cannot safely produce a decision."""
 
 
+class ShadowGapUnavailable(ShadowUnavailable):
+    """A closed hour was skipped; controlled catch-up is required."""
+
+
 @dataclass(frozen=True)
 class ShadowDecision:
     decision_id: str
@@ -231,7 +235,7 @@ class ShadowStore:
                     return False, status
                 if (status.last_candle_utc is not None and
                         decision.candle_close_utc != status.last_candle_utc + HOUR):
-                    raise ShadowUnavailable("Gap before new shadow candle; controlled catch-up required")
+                    raise ShadowGapUnavailable("Gap before new shadow candle; controlled catch-up required")
                 if decision.state_before != status.state:
                     raise ShadowUnavailable("Shadow state changed before decision was stored")
                 _validate_chain([*history, decision])

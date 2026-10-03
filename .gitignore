@@ -24,6 +24,9 @@ htmlcov/
 *.sqlite
 *.sqlite3
 *.db
+*.sqlite3.lock
+*.sqlite.lock
+*.db.lock
 logs/
 *.log
 
@@ -32,4 +35,3 @@ logs/
 ._*
 .idea/
 .vscode/
-
