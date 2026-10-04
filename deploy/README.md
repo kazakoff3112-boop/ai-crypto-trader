@@ -121,6 +121,39 @@ sudo -u ai-crypto-shadow sqlite3 /opt/ai-crypto-trader/data/shadow_trading.sqlit
 
 ## UPDATE CODE
 
+### Обновление действующего Shadow VPS для Telegram
+
+Это подготовленная процедура для отдельного ручного развёртывания. Текущий
+VPS этой задачей не обновляется. Перед работой на Mac создайте и проверьте
+Git commit и bundle нового `main`, не включая `.env` или SQLite.
+
+1. На VPS остановите `ai-crypto-shadow.timer` и дождитесь, пока
+   `ai-crypto-shadow.service` станет `inactive`; других сервисов не трогайте.
+2. Сделайте SQLite `.backup` действующей `shadow_trading.sqlite3` по разделу
+   выше и проверьте `PRAGMA integrity_check`. Запишите исходный Git HEAD.
+3. Передайте только bundle кода. Выполните `git fetch` и `merge --ff-only`
+   по процедуре UPDATE CODE ниже; **не заменяйте** существующую shadow DB.
+4. Обновите `.venv` (`python -m pip install -e /opt/ai-crypto-trader`).
+   Добавьте в существующий `/opt/ai-crypto-trader/.env` путь
+   `SHADOW_NOTIFICATIONS_PATH=/opt/ai-crypto-trader/data/shadow_notifications.sqlite3`
+   и вручную, с правами `0600`, значения `AI_CRYPTO_TELEGRAM_BOT_TOKEN` и
+   `AI_CRYPTO_TELEGRAM_CHAT_ID`. Не передавайте секреты через Git или командную
+   строку. Новая notification DB создастся отдельно; старую shadow DB не трогайте.
+5. Из `/tmp` запустите offline test suite. В каталоге приложения выполните
+   `--status`, затем **вручную** `python -m ai_crypto_trader.diagnostics.telegram_notifications --test`
+   от пользователя `ai-crypto-shadow`. Проверьте pending/status и один
+   systemd service run по процедуре ниже.
+6. После успешных проверок запустите timer, убедитесь в штатном journal и
+   `other-service.timer=active`. При ошибке остановите AI timer и
+   разберите причину; не восстанавливайте shadow DB автоматически.
+
+Telegram используется только для `sendMessage`: ни входящих команд, ни
+торговых API в service нет. Уникальный event key подавляет обычные дубли;
+редкий дубль возможен, если Telegram принял сообщение непосредственно перед
+сбоем записи `sent_utc`. Отключение: очистите две Telegram-переменные в `.env`
+при остановленном timer, затем перезапустите timer. Shadow-решения продолжаются
+без Telegram.
+
 На Mac после проверенного commit создайте новый bundle и передайте его на VPS (как в FIRST INSTALL). На VPS:
 
 1. `sudo systemctl stop ai-crypto-shadow.timer`; дождитесь, пока `systemctl is-active ai-crypto-shadow.service` покажет `inactive` или `failed`. Не обновляйте файлы, пока service работает.

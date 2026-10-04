@@ -60,6 +60,12 @@ class FakeMarket:
 
 
 class ShadowTests(unittest.TestCase):
+    def setUp(self):
+        disabled = patch.dict("os.environ", {"AI_CRYPTO_TELEGRAM_BOT_TOKEN": "",
+                                           "AI_CRYPTO_TELEGRAM_CHAT_ID": ""})
+        disabled.start()
+        self.addCleanup(disabled.stop)
+
     def test_buy_restart_sell_and_exactly_once_without_paper_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             shadow_path = Path(directory) / "shadow.sqlite3"
@@ -217,6 +223,12 @@ class ShadowTests(unittest.TestCase):
 
 
 class ShadowCatchUpTests(unittest.TestCase):
+    def setUp(self):
+        disabled = patch.dict("os.environ", {"AI_CRYPTO_TELEGRAM_BOT_TOKEN": "",
+                                           "AI_CRYPTO_TELEGRAM_CHAT_ID": ""})
+        disabled.start()
+        self.addCleanup(disabled.stop)
+
     def _baseline(self, path):
         store = ShadowStore(path)
         ShadowRunner(store, FakeMarket(history(FIRST_END, spike_close=False)),

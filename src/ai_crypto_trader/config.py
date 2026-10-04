@@ -49,6 +49,9 @@ class Settings:
     database_path: Path = Path("data/ai_crypto_trader.sqlite3")
     historical_cache_path: Path = Path("data/historical_market_data.sqlite3")
     shadow_database_path: Path = Path("data/shadow_trading.sqlite3")
+    shadow_notifications_path: Path = Path("data/shadow_notifications.sqlite3")
+    telegram_bot_token: str = field(default="", repr=False)
+    telegram_chat_id: str = field(default="", repr=False)
     backtest_position_size_pct: Decimal = Decimal("25")
 
     def __post_init__(self) -> None:
@@ -61,8 +64,8 @@ class Settings:
         if self.allowed_symbols != ALLOWED_SYMBOLS or self.allowed_categories != ALLOWED_CATEGORIES:
             raise ValueError("Safety allowlists cannot be overridden")
         if len({self.database_path.resolve(), self.historical_cache_path.resolve(),
-                self.shadow_database_path.resolve()}) != 3:
-            raise ValueError("Paper ledger, historical cache and shadow database must be separate")
+                self.shadow_database_path.resolve(), self.shadow_notifications_path.resolve()}) != 4:
+            raise ValueError("Paper, cache, shadow and notification databases must be separate")
         if self.initial_capital_usdt != Decimal("1000"):
             raise ValueError("Internal starting capital must be 1000 USDT")
         if not self.spot_fee_rate.is_finite() or self.spot_fee_rate < 0 or self.spot_fee_rate >= 1:
@@ -104,5 +107,8 @@ def load_settings(dotenv_path: str | Path = ".env", environ: Mapping[str, str] |
         database_path=Path(source.get("DATABASE_PATH", "data/ai_crypto_trader.sqlite3")),
         historical_cache_path=Path(source.get("HISTORICAL_CACHE_PATH", "data/historical_market_data.sqlite3")),
         shadow_database_path=Path(source.get("SHADOW_DATABASE_PATH", "data/shadow_trading.sqlite3")),
+        shadow_notifications_path=Path(source.get("SHADOW_NOTIFICATIONS_PATH", "data/shadow_notifications.sqlite3")),
+        telegram_bot_token=source.get("AI_CRYPTO_TELEGRAM_BOT_TOKEN", ""),
+        telegram_chat_id=source.get("AI_CRYPTO_TELEGRAM_CHAT_ID", ""),
         backtest_position_size_pct=Decimal(source.get("BACKTEST_POSITION_SIZE_PCT", "25")),
     )

@@ -186,8 +186,14 @@ def _validate_chain(decisions: list[ShadowDecision]) -> ShadowStatus:
 
 
 class ShadowStore:
-    def __init__(self, path: Path | str) -> None:
+    def __init__(self, path: Path | str, *, read_only: bool = False) -> None:
         self.path = Path(path)
+        if read_only:
+            with closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+                if db.execute("PRAGMA user_version").fetchone()[0] != 1:
+                    raise ShadowUnavailable("Unsupported shadow database schema")
+            self.status()
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.path)) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
@@ -222,8 +228,17 @@ class ShadowStore:
         return decisions, _validate_chain(decisions)
 
     def status(self) -> ShadowStatus:
-        with closing(sqlite3.connect(self.path)) as db:
+        with closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
             return self._history(db)[1]
+
+    def decisions_since(self, candle_utc: datetime | None) -> tuple[ShadowDecision, ...]:
+        """Read committed decisions for an optional notification outbox cursor."""
+        with closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+            where = "WHERE candle_close_utc > ?" if candle_utc else ""
+            parameters = (candle_utc.isoformat(),) if candle_utc else ()
+            rows = db.execute(f"SELECT {', '.join(_COLUMNS)} FROM shadow_decisions "
+                              f"{where} ORDER BY candle_close_utc", parameters).fetchall()
+        return tuple(_read(row) for row in rows)
 
     def append(self, decision: ShadowDecision) -> tuple[bool, ShadowStatus]:
         with closing(sqlite3.connect(self.path, timeout=10)) as db:

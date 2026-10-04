@@ -2,6 +2,38 @@
 
 Безопасный фундамент локального Python-проекта для будущей **Bybit Demo SPOT** торговли. SMA, Donchian и Bollinger baseline существуют только для офлайн-backtest; система не умеет отправлять ордера.
 
+## Telegram для Shadow Mode
+
+Telegram здесь только сообщает о теневых сигналах и состоянии наблюдателя.
+Сообщение `NO TRADE EXECUTED` означает, что ни PAPER, ни Bybit ордер не
+создавался. Бот не читает входящие сообщения и не принимает команды.
+Уведомляются BUY_SIGNAL, SELL_SIGNAL, GAP, ошибки публичных данных/сети/локального
+хранилища и однократное восстановление HEALTHY. Обычные HOLD и
+ALREADY_PROCESSED не отправляются. Исторические сигналы ручного catch-up
+помечены `SHADOW SIGNAL RECOVERED DURING CATCH-UP`.
+
+В локальном `.env` (не коммитить) задайте `AI_CRYPTO_TELEGRAM_BOT_TOKEN` и
+`AI_CRYPTO_TELEGRAM_CHAT_ID`; пустые значения отключают уведомления без остановки
+Shadow Mode. `SHADOW_NOTIFICATIONS_PATH` по умолчанию указывает на
+`data/shadow_notifications.sqlite3`. Отдельная БД хранит события, попытки,
+безопасные категории ошибок и состояние дедупликации, но не секреты. Команда
+`python -m ai_crypto_trader.diagnostics.shadow_runner --status` показывает
+pending и последнее событие без раскрытия credentials. Единственное ручное
+тестовое сообщение отправляется командой
+`python -m ai_crypto_trader.diagnostics.telegram_notifications --test`.
+Эту команду запускает оператор, не автоматический test suite.
+
+Если Telegram недоступен, shadow-решение остаётся записанным, а уведомление
+остаётся pending и повторяется следующим запуском. Неудачные попытки не
+образуют бесконечный retry в одном запуске. Если процесс успел отправить
+сообщение, но упал до записи `sent_utc`, Telegram Bot API не позволяет
+гарантировать отсутствие редкого дубля после перезапуска. При недоступности
+самой notification-БД shadow продолжается, но уведомление может быть пропущено;
+оператор должен проверить локальное хранилище. При первом включении старые
+решения не рассылаются задним числом.
+
+Официальный метод отправки: [Telegram Bot API sendMessage](https://core.telegram.org/bots/api#sendmessage).
+
 ## Границы безопасности
 
 - только `https://api-demo.bybit.com` и режим `demo`;
@@ -28,7 +60,8 @@ src/ai_crypto_trader/
   database/              SQLite-хранилище и последовательные миграции
   analytics/             read-only оценка Portfolio и история сделок
   backtesting/           изолированный офлайн-движок для исторических свечей
-  telegram_interface/    будущий Telegram-интерфейс
+  notifications/         исходящие Shadow-уведомления Telegram и отдельная SQLite
+  telegram_interface/    заготовка будущего интерфейса (не используется Shadow)
 tests/                   автоматические проверки безопасности
 ```
 
