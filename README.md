@@ -1,5 +1,7 @@
 # AI Crypto Trader
 
+[![Tests](https://github.com/kazakoff3112-boop/ai-crypto-trader/actions/workflows/tests.yml/badge.svg)](https://github.com/kazakoff3112-boop/ai-crypto-trader/actions/workflows/tests.yml)
+
 A production-style crypto trading research platform with offline backtesting,
 market-regime analysis, execution simulation and an order-free **Shadow Mode**.
 The name is a project label: the current strategies are deterministic rules,
