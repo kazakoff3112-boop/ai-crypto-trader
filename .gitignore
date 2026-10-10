@@ -21,9 +21,18 @@ dist/
 htmlcov/
 
 # Local data and logs
+/data/
+backups/
+cache/
+tmp/
+temp/
+*.bundle
 *.sqlite
 *.sqlite3
 *.db
+*.sqlite-*
+*.sqlite3-*
+*.db-*
 *.sqlite3.lock
 *.sqlite.lock
 *.db.lock
@@ -35,3 +44,17 @@ logs/
 ._*
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
+
+# Private operator material (never part of the public project)
+.ssh/
+known_hosts*
+id_rsa*
+id_ed25519*
+*.pem
+*.key
+.*_history
+/deploy_*.py
+/configure_telegram_only.py

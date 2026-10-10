@@ -1,76 +1,69 @@
 # AI Crypto Trader
 
-Безопасный фундамент локального Python-проекта для будущей **Bybit Demo SPOT** торговли. SMA, Donchian и Bollinger baseline существуют только для офлайн-backtest; система не умеет отправлять ордера.
+A production-style crypto trading research platform with offline backtesting,
+market-regime analysis, execution simulation and an order-free **Shadow Mode**.
+The name is a project label: the current strategies are deterministic rules,
+not an AI model or a promise of profitable trading.
 
-## Telegram для Shadow Mode
+## What it does
 
-Telegram здесь только сообщает о теневых сигналах и состоянии наблюдателя.
-Сообщение `NO TRADE EXECUTED` означает, что ни PAPER, ни Bybit ордер не
-создавался. Бот не читает входящие сообщения и не принимает команды.
-Уведомляются BUY_SIGNAL, SELL_SIGNAL, GAP, ошибки публичных данных/сети/локального
-хранилища и однократное восстановление HEALTHY. Обычные HOLD и
-ALREADY_PROCESSED не отправляются. Исторические сигналы ручного catch-up
-помечены `SHADOW SIGNAL RECOVERED DURING CATCH-UP`.
+- Validated BTC/ETH spot market data through the Bybit V5 public API.
+- Offline historical backtesting with SMA crossover, Donchian breakout and
+  Bollinger mean-reversion baselines.
+- A BTCUSDT 1h Market Regime Analyzer: SMA50, SMA200 and 24h SMA200 slope,
+  classifying BULL, BEAR and SIDEWAYS conditions.
+- Regime-aware strategies, including BULL-filtered Donchian and BULL Regime Hold.
+- Stateful Shadow Mode, gap detection and explicit controlled catch-up.
+- A separate, manually confirmed paper trading engine and virtual 1,000 USDT
+  portfolio, independent of any exchange balance.
+- SQLite append-only ledgers, trade analytics and benchmark comparisons.
+- Outgoing Telegram alerts and hardened systemd deployment templates.
 
-В локальном `.env` (не коммитить) задайте `AI_CRYPTO_TELEGRAM_BOT_TOKEN` и
-`AI_CRYPTO_TELEGRAM_CHAT_ID`; пустые значения отключают уведомления без остановки
-Shadow Mode. `SHADOW_NOTIFICATIONS_PATH` по умолчанию указывает на
-`data/shadow_notifications.sqlite3`. Отдельная БД хранит события, попытки,
-безопасные категории ошибок и состояние дедупликации, но не секреты. Команда
-`python -m ai_crypto_trader.diagnostics.shadow_runner --status` показывает
-pending и последнее событие без раскрытия credentials. Единственное ручное
-тестовое сообщение отправляется командой
-`python -m ai_crypto_trader.diagnostics.telegram_notifications --test`.
-Эту команду запускает оператор, не автоматический test suite.
+## Safety design
 
-Если Telegram недоступен, shadow-решение остаётся записанным, а уведомление
-остаётся pending и повторяется следующим запуском. Неудачные попытки не
-образуют бесконечный retry в одном запуске. Если процесс успел отправить
-сообщение, но упал до записи `sent_utc`, Telegram Bot API не позволяет
-гарантировать отсутствие редкого дубля после перезапуска. При недоступности
-самой notification-БД shadow продолжается, но уведомление может быть пропущено;
-оператор должен проверить локальное хранилище. При первом включении старые
-решения не рассылаются задним числом.
+- **Spot only:** BTCUSDT / ETHUSDT allowlist; derivatives, leverage, margin and
+  short positions are rejected.
+- The private read-only connectivity check permits **Bybit Demo only**.
+  The application exposes no create/amend/cancel order methods.
+- Shadow signals are observations, **not trades**. Shadow never calls the paper
+  engine or executes exchange orders.
+- Telegram is notifications-only: no incoming commands, webhooks or remote trades.
+- Fail-closed checks reject invalid prices, stale quotes, malformed candles,
+  gaps, duplicates and inconsistent persisted state.
+- Financial calculations use `Decimal`; SQLite stores decimal values as text.
+- Append-only financial and decision ledgers, transactional writes, unique
+  decision keys and a process lock protect against partial writes and duplicates.
+- Paper, historical-cache, shadow and notification databases are separate.
+- Secrets are loaded from environment / an ignored `.env`. No runtime data,
+  credentials or production database is distributed with this repository.
 
-Официальный метод отправки: [Telegram Bot API sendMessage](https://core.telegram.org/bots/api#sendmessage).
-
-## Границы безопасности
-
-- только `https://api-demo.bybit.com` и режим `demo`;
-- только категория `spot`;
-- только `BTCUSDT` и `ETHUSDT`;
-- margin, leverage, futures, perpetual, linear, inverse и options запрещены;
-- внутренний капитал стратегии зафиксирован на `1000 USDT` и не зависит от Demo-баланса Bybit;
-- секреты читаются только из переменных окружения или локального `.env`, который игнорируется Git.
-
-## Структура
+## Architecture
 
 ```text
-src/ai_crypto_trader/
-  config.py             безопасная конфигурация
-  safety/               центральный fail-closed guard
-  bybit/                 узкий read-only Bybit V5 клиент
-  market_data/           проверенные spot-котировки Decimal
-                         и отдельные исторические OHLCV-свечи
-  diagnostics/           ручная проверка подключения
-  trading_engine/        Paper Trading Engine и отдельный shadow runner
-  strategies/            SMA, Donchian и Bollinger baseline только для офлайн-backtest
-  risk_management/       заготовка риск-менеджмента
-  portfolio/             виртуальный Portfolio и append-only Ledger
-  database/              SQLite-хранилище и последовательные миграции
-  analytics/             read-only оценка Portfolio и история сделок
-  backtesting/           изолированный офлайн-движок для исторических свечей
-  notifications/         исходящие Shadow-уведомления Telegram и отдельная SQLite
-  telegram_interface/    заготовка будущего интерфейса (не используется Shadow)
-tests/                   автоматические проверки безопасности
+Public Market Data (validated closed candles)
+   ↓
+Market Regime Analyzer
+   ↓
+Strategy
+   ↓
+Shadow Runner (FLAT / LONG; no execution)
+   ↓
+SQLite Decision Log
+   ↓
+Telegram Alerts (outgoing only)
+
+Historical Cache (read-only) → Backtester → Trade / Regime Analytics
+Explicit manual request     → Paper Engine → Portfolio / SQLite Ledger
 ```
 
-## Локальный запуск на Mac
+These paths are deliberately separate: a shadow signal does not become a paper
+trade, and a backtest cannot mutate the live shadow or paper ledger.
 
-Нужен Python 3.9 или новее. Настоящие ключи на текущем этапе не нужны.
+## Local setup
+
+Python **3.9+**; the application has no third-party runtime dependencies.
 
 ```bash
-cd "/путь/к/AI Crypto Trader"
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
@@ -78,312 +71,85 @@ cp .env.example .env
 python -m unittest discover -s tests -v
 ```
 
-Не коммитьте `.env`. Публичные котировки доступны без API Key и API Secret. В клиенте отсутствуют методы создания, изменения и отмены ордеров.
+Keep `.env` local and never commit it. Public market data and Shadow Mode do
+not require exchange credentials. Telegram is disabled until both notification
+environment values are configured. Do not paste credentials into shell commands,
+screenshots, issues or logs.
 
-## Котировки и ручная проверка Bybit Demo
+The test command is offline. Data downloads, live shadow runs, Telegram test
+messages and paper executions are separate, explicit operator actions.
 
-Market Data получает `BTCUSDT` и `ETHUSDT` через официальный публичный V5 `GET /v5/market/tickers` с `category=spot`. Возвращаются last, bid, ask как точные `Decimal` и UTC-время ответа. Пустой, ошибочный или устаревший ответ отклоняется; цена не подставляется. Получение цены само по себе не меняет Portfolio.
+## Backtesting
 
-Для приватной проверки Demo credentials используется только `GET /v5/account/info` на `https://api-demo.bybit.com`. Его ответ нужен лишь для подтверждения доступа: данные аккаунта и Demo-баланс не попадают в Portfolio. Поддерживаются системные HMAC API-ключи Bybit. Создайте локальный файл `cp .env.example .env`, при необходимости внесите туда только свои Demo credentials и никогда не добавляйте `.env` в Git. Лучше выдать ключу право только на чтение.
+Backtests read an existing validated historical cache without network access.
+Each run uses an isolated virtual portfolio. Strategies see only closed candles
+and an immutable portfolio snapshot. A signal at candle N executes at **N+1
+open**, never at the signal candle's close.
 
-Запускайте диагностику вручную из активированного виртуального окружения:
+Fees and adverse slippage are included. Slippage is embedded in execution price
+and is not charged twice. Reports include completed-trade statistics, profit
+factor, turnover, cost drag, equity, maximum drawdown, exposure and separately
+marked open positions. Accounting identities are checked with Decimal tolerance.
+Comparisons include Buy & Hold and allocation-matched benchmarks, with their
+equity, costs and drawdowns. Regime attribution is diagnostic, not evidence that
+a post-hoc filter will generalize.
 
-```bash
-python -m ai_crypto_trader.diagnostics.bybit_connection
-```
-
-Она выводит две публичные котировки, а при наличии обоих Demo credentials делает одну приватную проверку только на чтение. Ключи, подпись и ответ аккаунта не выводятся. Автоматические тесты не требуют интернет или credentials. Торговля через API на этом этапе отсутствует.
-
-## Виртуальный Portfolio
-
-`Portfolio` всегда начинает обычный запуск с собственных `1000 USDT` и нулевых BTC/ETH. Он не читает баланс Bybit. Методы `buy()` и `sell()` только симулируют spot-сделки внутри памяти процесса, используя `Decimal` для всех расчётов. Ставка комиссии берётся из `SPOT_FEE_RATE` (по умолчанию `0.001`), а slippage передаётся отдельной стоимостью.
-
-Каждое успешное изменение создаёт неизменяемую UTC-запись в append-only `Ledger`. Отклонённая операция не меняет ни Portfolio, ни Ledger. Средняя цена входа включает комиссию и slippage покупки; realized P&L также учитывает издержки покупки и продажи.
-
-## Локальная база SQLite
-
-По умолчанию база находится в `data/ai_crypto_trader.sqlite3`; путь можно изменить локальной переменной `DATABASE_PATH`. Файлы `.db`, `.sqlite` и `.sqlite3` исключены из Git. В базе находятся версия схемы, исходный виртуальный капитал и последовательный Ledger. Отдельной изменяемой таблицы балансов нет: при каждом запуске Portfolio детерминированно восстанавливает USDT, BTC, ETH, средние цены и P&L проигрыванием Ledger с начала.
-
-Все значения `Decimal` сохраняются в SQLite как точный текст (`TEXT`), а не как неточный `REAL`. Ledger принимает только INSERT; SQLite-триггеры запрещают UPDATE и DELETE. Запись сначала фиксируется SQLite-транзакцией и лишь затем применяется в памяти. При ошибке сохранения операция полностью отклоняется.
-
-При переносе на VPS файл БД нужно копировать только при остановленном процессе либо через штатный SQLite backup. На VPS путь следует вынести во внешний постоянный каталог, включить резервное копирование и ограничить права доступа к файлу.
-
-## Paper Trading
-
-Bybit Demo даёт только рыночные котировки. Наш Paper Portfolio хранит свой виртуальный капитал `1000 USDT`; Demo-баланс Bybit не читается для размера сделки и не влияет на него. Paper Engine принимает явный запрос на BUY в USDT или SELL в количестве актива (либо всей позиции). Стратегий и автоматических решений пока нет. Исполнение требует Portfolio с SQLite Ledger.
-
-BUY использует лучшую цену продажи (`ask`), SELL — лучшую цену покупки (`bid`). `last` остаётся справочной величиной и не используется для исполнения. При `PAPER_SLIPPAGE_BPS = b` цена BUY равна `ask × (1 + b/10000)`, а цена SELL — `bid × (1 − b/10000)`. Комиссия равна `quantity × execution_price × SPOT_FEE_RATE`. Slippage показывается отдельно как `quantity × разница цен`, но уже включён в execution price и второй раз не списывается. Движок отклоняет устаревшие/ошибочные котировки, нехватку средств и сбои SQLite. В Ledger сохраняются market bid/ask, execution price, комиссия, slippage и P&L. Новая миграция добавляет bid/ask без удаления старых записей.
-
-Для безопасного просмотра расчёта вручную выполните:
+Example using an **already populated local cache**:
 
 ```bash
-python -m ai_crypto_trader.diagnostics.paper_trade --preview --side buy --symbol BTCUSDT --usdt 100
+python -m ai_crypto_trader.diagnostics.backtest \
+  --symbol BTCUSDT --interval 15m --strategy donchian-breakout \
+  --entry-lookback 96 --exit-lookback 48 --position-size-pct 25
 ```
 
-Можно указать `--side sell --symbol BTCUSDT --quantity 0.01` или `--all` вместо `--quantity`. Режим `--preview` получает реальную котировку и показывает предполагаемую цену, издержки и виртуальный баланс; он не создаёт запись сделки в Ledger и не изменяет Portfolio. Если локальной БД ещё нет, для чтения стартового состояния создаётся пустая БД с 1000 USDT.
+No price history is included. See [the detailed usage guide](docs/usage.md) for
+data preparation, explicit evaluation periods and analytics. The
+[experiment registry](docs/experiment_registry.md) records hypotheses and
+pre-selected validation periods. A viewed period is no longer independent OOS;
+one positive backtest does not prove profitability.
 
-Ручная paper-сделка включается только отдельным флагом и требует точного подтверждения `YES` после полного preview:
+## Forward Shadow Testing
+
+Shadow Mode is designed for continuous VPS observation of fully closed BTCUSDT
+1h candles. It persists a logical FLAT/LONG state, detects missing hours and
+requires preview plus explicit confirmation for controlled catch-up (at most
+72 hours). It never silently skips a gap or fabricates missing candles.
+
+An illustrative cycle is `BUY_SIGNAL → LONG → SELL_SIGNAL → FLAT`.
+This is a state transition example, **not a claim of an executed trade**.
+Notifications say `NO TRADE EXECUTED`. HOLD and ALREADY_PROCESSED do not produce
+routine alerts. Event keys deduplicate normal retries; a rare duplicate remains
+possible if Telegram accepts a message immediately before local delivery-state
+commit. Pending messages retry on later runs. Notification storage failure may
+lose an alert but does not undo the recorded shadow decision.
+
+Only one host should run live shadow observation. Keep development separate.
+See [deployment templates and operator procedures](deploy/README.md). Deployment
+is manual; cloning this repository does not install or start a service.
+
+## Testing
+
+**256 / 256 tests passed** using Python's standard-library **unittest**.
+Fixtures and mocks cover safety guards, precision, portfolio accounting,
+SQLite replay / transactions, market-data failures, no-look-ahead execution,
+strategies, analytics, shadow state / catch-up, locks and notification dedup.
+The full suite also passes with outbound socket connections blocked.
 
 ```bash
-python -m ai_crypto_trader.diagnostics.paper_trade --execute-paper --side buy --symbol BTCUSDT --usdt 100
+python -m unittest discover -s tests -v
 ```
 
-Любой другой ответ отменяет операцию. Одна ручная BUY или SELL ограничена `MAX_MANUAL_PAPER_TRADE_USDT` (по умолчанию `250 USDT`). После подтверждения система получает новую котировку и заново рассчитывает план. Изменение execution price ограничено `MAX_MANUAL_PRICE_CHANGE_BPS` (по умолчанию 10 bps, то есть 0,10%); при большем движении сделка отменяется и требует нового preview. Свежий план повторно проверяется вместе с состоянием Portfolio, затем атомарно записывается в SQLite. `--execute-paper` меняет только наш виртуальный Portfolio и Ledger. Ни `--preview`, ни `--execute-paper` не отправляют ордеров Bybit.
+## Tech stack
 
-При отказе команда показывает безопасную категорию причины: устаревшая котировка, чрезмерное изменение цены, недостаточный виртуальный баланс, превышение ручного лимита, изменение Portfolio, ошибка конфигурации или недоступность SQLite. API Key, Secret и подпись в сообщениях не выводятся.
+Python · Decimal · sqlite3 · unittest · Bybit V5 public API · Telegram Bot API ·
+Linux systemd. Build tooling: setuptools. No ORM or optimizer is required.
 
-Текущее виртуальное состояние можно посмотреть без котировок и сделки:
+## License
 
-```bash
-python -m ai_crypto_trader.diagnostics.paper_trade --status
-```
+[MIT](LICENSE).
 
-## Отчёт и история PAPER-портфеля
+## Disclaimer
 
-Текущая стоимость активов считается по свежему `bid`: это консервативная цена, по которой открытую spot-позицию можно было бы продать сейчас. `Equity = виртуальный USDT + BTC × BTC bid + ETH × ETH bid`. При двух открытых активах нужны обе свежие котировки; при отсутствии любой из них отчёт не выдаётся.
-
-`Average entry` — средняя себестоимость открытой позиции; она уже включает комиссию покупки и ухудшение цены из-за slippage. `Realized P&L` — результат проданных объёмов после издержек покупки и продажи. `Unrealized P&L = рыночная стоимость открытых позиций − их себестоимость`. `Total P&L = equity − стартовые 1000 USDT`; `Return % = Total P&L / стартовый капитал × 100`. Комиссия и slippage показаны отдельно для понимания затрат, но повторно из P&L не вычитаются.
-
-Отчёт с актуальными публичными котировками:
-
-```bash
-python -m ai_crypto_trader.diagnostics.paper_report
-```
-
-Хронологическая история из локального Ledger и её сводка без сетевого запроса:
-
-```bash
-python -m ai_crypto_trader.diagnostics.paper_history
-```
-
-Обе команды открывают существующую SQLite только для чтения, проверяют целостность и не создают сделок. При нулевой позиции цена для этого актива обозначается как `N/A`; неизвестная цена открытой позиции никогда не заменяется нулём.
-
-## Live Shadow Mode: наблюдение без сделок
-
-Shadow Mode наблюдает публичные закрытые свечи `BTCUSDT spot 1h` и применяет неизменённые правила `1h BULL Regime Hold` (`regime-bull-hold-v1`). Он выдаёт `BUY_SIGNAL`, `SELL_SIGNAL` или `HOLD`, но **сигнал не является сделкой**: не вызываются методы Portfolio, Paper Engine и отправки ордеров. Так можно сначала проверить поведение правила на новых часах и устойчивость запуска, прежде чем отдельно обсуждать автоматическую paper-торговлю.
-
-Один ручной запуск обрабатывает только последнюю полностью закрытую часовую свечу, используя её и необходимые предыдущие закрытые свечи для SMA50/SMA200 и наклона SMA200 за 24 часа. Логическое состояние `FLAT`/`LONG` означает лишь «позиция была бы открыта»; количество BTC и деньги здесь не хранятся. На переходе non-BULL → BULL из `FLAT` возникает `BUY_SIGNAL` и состояние становится `LONG`; при BULL → non-BULL из `LONG` — `SELL_SIGNAL` и `FLAT`. Остальные часы дают `HOLD`. В этом режиме нет исполнения на следующей свече: фиксируется только решение после закрытия текущей.
-
-Решения и состояние хранятся отдельно в `data/shadow_trading.sqlite3` (путь `SHADOW_DATABASE_PATH` в локальном `.env`). Каждая append-only запись содержит идентификатор, версию стратегии, UTC-время свечи и решения, OHLC, предыдущий/текущий режим, SMA, действие, причину и состояние до/после. Decimal хранится точным текстом. Состояние после перезапуска восстанавливается из последовательности записей; уникальный ключ для версии, символа, интервала и часа не позволяет повторно записать решение или сигнал для той же свечи. Изменение или удаление записей запрещено SQLite-триггерами.
-
-Первый запуск начинает с `FLAT` и **не** восстанавливает задним числом гипотетические прошлые сделки. Если между последним обработанным и новым закрытым часом есть пропуск, обычный `--once` останавливается и сообщает `GAP`: перескакивание изменило бы последовательность сигналов. Он никогда не включает догоняющую обработку автоматически. При недоступности данных или SQLite решение не записывается. Файл shadow-БД, как и другие `.sqlite3`, игнорируется Git.
-
-После установки проекта ручной однократный запуск с публичным сетевым запросом (без API credentials):
-
-```bash
-python -m ai_crypto_trader.diagnostics.shadow_runner --once
-```
-
-Локальный статус без сети:
-
-```bash
-python -m ai_crypto_trader.diagnostics.shadow_runner --status
-```
-
-Повторный `--once` на том же закрытом часе показывает `ALREADY_PROCESSED` и не добавляет запись. Эти команды не затрагивают PAPER Portfolio или Ledger.
-
-Для отдельного 24/7 запуска shadow на том же VPS, где работает другие сервисы, подготовлены [systemd units и пошаговая инструкция](deploy/README.md). Приложения используют разные каталоги, пользователей, virtualenv, `.env`, SQLite и журналы. Перенос существующей shadow-БД и первый запуск на сервере выполняются вручную; после активации VPS он остаётся единственным live shadow runner.
-
-### Controlled catch-up после пропущенных часов
-
-Controlled catch-up — отдельная ручная процедура для уже существующей shadow-истории. В пустой базе она запрещена: первый baseline по-прежнему создаёт только обычный `--once`. Процедура получает все необходимые публичные закрытые `1h`-свечи, проверяет непрерывность и OHLC, а затем в памяти последовательно применяет ту же `regime-bull-hold-v1` к каждому пропущенному часу. Поэтому переходы `non-BULL → BULL` и `BULL → non-BULL` внутри gap не теряются.
-
-Сначала выполните безопасный preview:
-
-```bash
-python -m ai_crypto_trader.diagnostics.shadow_runner --catch-up --preview
-```
-
-Preview показывает границы, число часов, исходное состояние и health, но ничего не записывает и не меняет shadow-state или PAPER. Для записи нужен отдельный запуск и точное подтверждение `YES`:
-
-```bash
-python -m ai_crypto_trader.diagnostics.shadow_runner --catch-up --execute
-```
-
-План ограничен `MAX_SHADOW_CATCHUP_HOURS = 72`: более длинный простой не разбивается и требует отдельного решения. После `YES` весь approved batch записывается одной SQLite-транзакцией. Ошибка сети, данных, состояния или любой записи откатывает batch целиком — частично выполненного catch-up не остаётся. Уникальный ключ каждого часа продолжает обеспечивать exactly-once; неожиданное изменение базы между preview-планом и записью приводит к отказу. Это всё ещё только Shadow Mode: PAPER-сделок, Bybit-ордеров, wallet/balance-вызовов, scheduler и Telegram здесь нет.
-
-## Исторические свечи для будущего backtest
-
-OHLCV-свеча содержит цену открытия, максимум, минимум, цену закрытия и объём за фиксированный интервал. История нужна, чтобы позднее проверять идеи на прошлых данных. Сейчас система только собирает и проверяет данные: индикаторов, сигналов, стратегий и сделок здесь нет.
-
-Публичный Bybit V5 `GET /v5/market/kline` вызывается только с `category=spot` для `BTCUSDT` и `ETHUSDT`. Доступны `1m`, `5m`, `15m`, `1h`. Диапазон задаётся UTC-интервалом `[начало, конец)`; ответ Bybit приходит от новых свечей к старым, а клиент возвращает их от старых к новым. Запросы разбиваются на страницы максимум по 1000 свечей. Пропуски, дубликаты, неверный порядок и некорректные OHLCV приводят к отказу — отсутствующие свечи не дорисовываются. Все цены и объёмы хранятся как точные `Decimal`/текст SQLite.
-
-По умолчанию возвращаются только полностью закрытые свечи. Текущая незакрытая свеча могла бы дать backtest знание о будущем результате интервала — это *look-ahead bias*, из-за которого оценка стратегии становится недостоверной.
-
-Исторический кэш находится отдельно от торгового Ledger, по умолчанию в `data/historical_market_data.sqlite3` (`HISTORICAL_CACHE_PATH` в локальном `.env`). Таблица `candles` хранит свечи с уникальным ключом `(symbol, interval, open_time_ms)`; `fetch_batches` хранит источник `Bybit`, диапазон, число свечей и UTC-время загрузки. Повторное сохранение одинаковых свечей не создаёт дубликаты; конфликтующие данные отклоняются. Кэш не содержит API Secret и не меняет Portfolio. SQLite-файлы игнорируются Git.
-
-Загрузка выполняется только вручную и использует публичный endpoint без API-ключа:
-
-```bash
-python -m ai_crypto_trader.diagnostics.historical_data --symbol BTCUSDT --interval 15m --days 7
-```
-
-Просмотр локального кэша без сети:
-
-```bash
-python -m ai_crypto_trader.diagnostics.historical_data --offline-summary
-```
-
-## Изолированный backtest
-
-Backtest — проверка технических правил на уже сохранённой истории. Он **не** использует текущий PAPER Portfolio, торговый Ledger, API-ключи или сеть: каждый запуск создаёт новый in-memory Portfolio с `1000 USDT` (либо явно заданным тестовым капиталом). Исторический кэш открывается только для чтения. Технические фикстуры `no-trade`, `buy-once` и `buy-then-sell` нужны лишь для проверки движка; отдельные SMA, Donchian и Bollinger baseline не являются инвестиционными рекомендациями.
-
-После закрытия свечи N фикстура видит только её и предыдущие закрытые свечи, а также неизменяемый снимок виртуального Portfolio. Сигнал BUY/SELL исполняется на **открытии свечи N+1**, никогда по close свечи N. Сигнал последней свечи не исполняется. Это защищает от *look-ahead bias* — использования информации, которая в момент решения ещё не была известна. Вся входная история должна быть непрерывной, по порядку и уже закрытой; иначе запуск отклоняется.
-
-Базовая цена исполнения — следующий `open`, потому что исторические OHLCV не содержат bid/ask. BUY ухудшается вверх, SELL — вниз на `PAPER_SLIPPAGE_BPS`; комиссия `SPOT_FEE_RATE` считается от количества × итоговой цены исполнения. Slippage уже включён в цену и показывается отдельно в backtest Ledger, но **не списывается второй раз**. Позиция на последней свече не закрывается принудительно: её стоимость оценивается по последнему `close`.
-
-Equity curve хранит виртуальную стоимость `USDT + количество актива × close` на каждой закрытой свече. Максимальная просадка — наибольшее снижение equity от предыдущего пика; отчёт показывает её в USDT и процентах (стартовые 1000 USDT включены как начальный ориентир). Backtest не доказывает будущую прибыль: исторические цены не гарантируют повторения рынка, а эта упрощённая модель пока не учитывает ликвидность, спред и частичное исполнение.
-
-Офлайн-диагностика для уже загруженного непрерывного диапазона BTCUSDT 15m:
-
-```bash
-python -m ai_crypto_trader.diagnostics.backtest --symbol BTCUSDT --interval 15m --strategy no-trade
-```
-
-Команда ничего не скачивает и не создаёт PAPER-сделок. Её нужно запускать вручную; автоматически backtest на вашей сохранённой выборке не выполняется.
-
-## SMA20/SMA50: первый прозрачный baseline
-
-SMA — простое среднее цен закрытия последних N **закрытых** свечей. По умолчанию сравниваются SMA20 и SMA50. BUY возникает только когда на предыдущей свече быстрая SMA была не выше медленной, а на текущей стала выше. SELL — наоборот: быстрая была не ниже медленной и стала ниже. Пока позиция открыта, повторный BUY не выдаётся; без позиции SELL не выдаётся. Для первого сравнения нужны минимум 51 закрытая свеча, а для исполнения сигнала — следующая, поэтому запуск требует минимум 52 свечи.
-
-При BUY выделяется не более `BACKTEST_POSITION_SIZE_PCT` от меньшего из текущей equity и свободного USDT (по умолчанию `25%`). Этот бюджет фиксируется после сигнальной свечи; количество актива рассчитывается на следующем `open` уже с учётом slippage и комиссии. При SELL закрывается вся позиция. Никакого кредита, short или изменения PAPER-портфеля нет.
-
-SMA20/SMA50 — только заранее выбранный baseline, а не оптимальные параметры. Подбор многих комбинаций под известную историю ведёт к *overfitting*: правило подстраивается под прошлое и может не работать в будущем. Поэтому автоматического перебора параметров сейчас нет. Сравнение с Buy & Hold учитывает одинаковую долю стартового капитала; 100%-ный Buy & Hold показывается отдельно как контекст движения рынка.
-
-Ручной офлайн-прогон на уже сохранённых BTCUSDT 15m свечах:
-
-```bash
-python -m ai_crypto_trader.diagnostics.backtest --symbol BTCUSDT --interval 15m --strategy sma-cross --fast 20 --slow 50 --position-size-pct 25
-```
-
-Параметры `--fast`, `--slow` и `--position-size-pct` можно не указывать: применятся 20, 50 и локальная настройка `BACKTEST_POSITION_SIZE_PCT=25`. Команда не скачивает данные и не запускается автоматически.
-
-## Donchian Breakout: второй независимый baseline
-
-Канал Donchian использует экстремумы предыдущих свечей: верхнюю границу по `high` и нижнюю по `low`. В отличие от SMA crossover, здесь сигнал возникает не при пересечении двух средних цен, а при выходе `close` текущей закрытой свечи за прошлый экстремум. BUY возможен только без позиции, если `close` строго выше максимального `high` **предыдущих 96** свечей. SELL закрывает всю позицию, если `close` строго ниже минимального `low` **предыдущих 48** свечей. Текущая свеча не входит в окна; равенство границе не является сигналом. Сигнал на свече N исполняется лишь на `open` N+1; для запуска по умолчанию нужны минимум 98 закрытых свечей.
-
-Для 15m интервалы 96 и 48 свечей соответствуют примерно 24 и 12 часам. Эти значения и 25% капитала выбраны заранее как baseline; программа не перебирает и не оптимизирует их по уже увиденным 180 дням. Меньшая частота сделок *может* снизить влияние комиссий и slippage, но не гарантирована ни меньшая частота, ни прибыль. Даже положительный результат одного backtest не доказывает, что правило сработает в будущем.
-
-Ручной офлайн-прогон на уже сохранённых BTCUSDT 15m свечах:
-
-```bash
-python -m ai_crypto_trader.diagnostics.backtest --symbol BTCUSDT --interval 15m --strategy donchian-breakout --entry-lookback 96 --exit-lookback 48 --position-size-pct 25
-```
-
-Все три параметра можно опустить: по умолчанию Donchian использует именно `96/48/25`. Покупка расходует не более 25% меньшего из доступного USDT и equity; размер количества пересчитывается на следующем `open` с существующими комиссией и slippage. Применяются тот же `TRADE QUALITY` и три benchmark, что у SMA. Данные берутся только из локального read-only кэша; реальных и PAPER-сделок команда не выполняет.
-
-## Bollinger Mean Reversion: третий независимый baseline
-
-Полосы Боллинджера измеряют, насколько цена закрытия отклонилась от среднего. Для последних **20 полностью закрытых** свечей middle = среднее `close`, population variance = `Σ(closeᵢ − middle)² / 20`, stddev = `√variance`, upper = `middle + 2 × stddev`, lower = `middle − 2 × stddev`. Все вычисления выполняются через `Decimal`, без pandas, numpy и float. Если все цены одинаковы, stddev равен нулю и обе полосы совпадают с middle — это допустимо и само по себе не создаёт BUY.
-
-Mean reversion означает проверку идеи о возврате цены к среднему после сильного отклонения. Без позиции BUY появляется, только если `close` текущей закрытой свечи **строго ниже** её lower band. С открытой позицией SELL закрывает её целиком, когда `close ≥ middle band`. Равенство lower band не даёт BUY. Сигнал на свече N исполняется только по `open` свечи N+1; будущие свечи не участвуют в расчёте. При явном evaluation period 19 предыдущих свечей служат только warm-up для первого 20-свечного окна: сделок, equity curve и P&L в warm-up нет.
-
-BUY использует существующий лимит **25%** от меньшего из свободного USDT и текущей equity; комиссия и slippage действуют по общей модели backtest, без повторного списания. В отличие от SMA crossover и Donchian breakout, это baseline возврата к среднему, а не следования тренду. Параметры `20/2/25` зафиксированы заранее, а не выбраны по уже просмотренным результатам; optimizer отсутствует. Положительный исторический backtest не доказывает будущую прибыль, а подстройка параметров после просмотра истории разрушила бы независимость проверки.
-
-Ручной офлайн-прогон BTCUSDT 15m (самостоятельно проект его не запускает):
-
-```bash
-python -m ai_crypto_trader.diagnostics.backtest --symbol BTCUSDT --interval 15m --strategy bollinger-mean-reversion --bollinger-period 20 --stddev-multiplier 2 --position-size-pct 25
-```
-
-Команда также принимает существующие `--start` и `--end` для заранее выбранного evaluation period. Отчёт повторно использует `TRADE QUALITY`, Cash, matched 25% и full 100% Buy & Hold, а также time/capital exposure. Бумажный Portfolio и исторический кэш не изменяются.
-
-## Диагностика качества сделок
-
-После результата SMA, Donchian или Bollinger CLI показывает `TRADE QUALITY`. Завершённая long-only сделка — один BUY и следующий полностью закрывающий SELL; незакрытая позиция показана отдельно и не участвует в win rate. Для завершённой сделки `gross P&L до издержек = gross SELL по execution − gross BUY по execution + slippage BUY + slippage SELL`. `Net P&L = gross SELL − gross BUY − комиссии BUY/SELL`, что равно `gross P&L до издержек − комиссии − slippage`: ухудшение цены уже включено в execution и второй раз не списывается. Доходность отдельной сделки делится на фактически выделенный капитал `gross BUY + комиссия BUY`.
-
-Win rate — доля завершённых сделок с положительным net P&L; profit factor — сумма прибылей победителей / абсолютная сумма убытков проигравших. Если проигравших нет, profit factor выводится как `N/A`, а не вымышленное число. Turnover — сумма gross-номиналов всех BUY и SELL, включая BUY ещё открытой позиции. Время удержания измеряется между timestamp исполнения BUY и SELL.
-
-Для открытой позиции gross unrealized P&L до издержек считается по последнему `close`; её комиссия и slippage покупки включены в общие издержки. Аналитика сверяет итоговую equity, cash, количество, realized/unrealized P&L и тождество `итоговый P&L = gross P&L завершённых сделок + gross unrealized P&L − все комиссии − весь slippage` с ограниченной Decimal-погрешностью. При несоответствии отчёт отклоняется. «Доходность до издержек» приблизительна: это та же последовательность сделок без издержек, а не новая симуляция решений без издержек.
-
-## Эталоны и использование капитала
-
-После `TRADE QUALITY` отчёт показывает три независимых эталона на **том же evaluation period** (warm-up не участвует): `CASH` держит 1000 USDT без сделок, `MATCHED BUY & HOLD` один раз покупает на долю стартового капитала, равную `position_size_pct` стратегии (обычно 25%), а `FULL BUY & HOLD` один раз направляет в покупку почти весь капитал (бюджет 100%). Все покупки происходят только на `open` второй evaluation-свечи: сигнал появляется после закрытия первой. Оба Buy & Hold используют те же комиссию и slippage, удерживают актив до последнего `close` и не ребалансируются. В matched-варианте комиссия входит в 25%-ный бюджет покупки; как минимум 75% стартового капитала остаётся USDT. Slippage уже учтён в цене исполнения и не списывается повторно.
-
-Каждый эталон отдельно показывает allocation, стартовую и конечную equity, P&L, доходность, просадку в USDT и процентах, комиссию, slippage и суммарные издержки. В `FAIR COMPARISON` сопоставляются только стратегия и matched Buy & Hold: разница доходностей в процентных пунктах и обе просадки. Full Buy & Hold — лишь рыночный контекст; автоматического суждения «лучше/хуже» отчёт не делает. Даже одинаковый стартовый процент не означает одинаковый риск во времени: стратегия может входить позже и выходить раньше.
-
-`Time exposure` — процент evaluation-свечей, на закрытии которых есть позиция. `Capital exposure` на каждой такой свече равен `количество × close / текущая equity × 100%`, а без позиции равен нулю. Отчёт показывает среднее по **всем** evaluation-свечам и максимум. Эти величины считаются через `Decimal` и не меняют правила торговли, equity или исторический кэш.
-
-## Фиксированные периоды и out-of-sample
-
-*In-sample* — период, на котором идея уже обсуждалась или проверялась. *Out-of-sample* — заранее выбранный другой период для независимой проверки. Их evaluation-окна не должны пересекаться: иначе одни и те же рыночные события повлияют на обе оценки. Даты нельзя выбирать задним числом по прибыльности, а после просмотра out-of-sample результата нельзя подгонять SMA20/50 или Donchian96/48 под него и продолжать называть тот же период независимым тестом.
-
-Для явного запуска укажите `--start` и `--end` вместе в ISO 8601 UTC (`+00:00` или `Z`). Диапазон — `[start, end)`: свеча с `open_time == start` входит, с `open_time == end` не входит. Границы должны совпадать с интервалом свечей. Из локального кэша читается ровно этот диапазон и необходимый непрерывный warm-up перед ним: 50 предыдущих свечей для SMA20/50, 96 для Donchian96/48, 19 для Bollinger20/2, 0 для технических фикстур. Если чего-то не хватает, есть пропуск или свеча ещё не закрыта, backtest отказывается запускаться; сеть не используется.
-
-Warm-up нужен только для расчёта предыдущего среднего/экстремума. На его свечах стратегия не вызывается, сигналов и сделок нет, а equity curve, P&L, просадка, time/capital exposure и количество evaluation-свечей начинаются строго с `start`. Первый возможный сигнал — после закрытия первой evaluation-свечи; он исполняется на `open` следующей. Оба Buy & Hold и Cash тоже получают **только evaluation-свечи**; покупки не раньше второй из них. Без `--start/--end` сохраняется прежний режим всего непрерывного диапазона кэша без warm-up.
-
-Пример одного ручного запуска с заранее выбранными датами:
-
-```bash
-python -m ai_crypto_trader.diagnostics.backtest --symbol BTCUSDT --interval 15m --strategy sma-cross --fast 20 --slow 50 --position-size-pct 25 --start 2026-04-03T19:15:00+00:00 --end 2026-09-30T19:15:00+00:00
-```
-
-Эти даты — только пример формата, а не рекомендованные границы исследования. Перед запуском убедитесь, что они были выбраны без оглядки на доходность и целиком доступны в вашем локальном кэше. Отчёт явно показывает evaluation и warm-up границы и число свечей.
-
-Два окна можно проверить без запуска стратегии:
-
-```bash
-python -m ai_crypto_trader.diagnostics.backtest_periods --first-start 2026-04-03T19:15:00+00:00 --first-end 2026-06-30T19:15:00+00:00 --second-start 2026-06-30T19:15:00+00:00 --second-end 2026-09-30T19:15:00+00:00 --symbol BTCUSDT --interval 15m
-```
-
-Команда показывает порядок, пересечение, gap, длительность и число свечей в кэше, если он есть. Проверка количества не заменяет строгую проверку непрерывности при самом backtest. Оба режима работают только offline и не меняют PAPER Portfolio/Ledger или исторический кэш.
-
-## Почасовой анализ режима рынка
-
-*Market regime* — описательная классификация состояния BTCUSDT, а не сигнал на покупку или продажу. Отдельный read-only анализатор использует только **полностью закрытые 1h-свечи**: 1h даёт более сглаженную картину долгого тренда, чем рабочие 15m-свечи стратегий. Для свечи N он считает SMA50, SMA200 и SMA200 за 24 закрытых часа до N. `BULL`, если одновременно `close > SMA200`, `SMA50 > SMA200`, `SMA200 > прежней SMA200`; `BEAR`, если все три строгих неравенства обратные; иначе `SIDEWAYS`. SMA50 показывает более короткое направление, SMA200 — долгий уровень, а изменение SMA200 за 24 часа проверяет наклон этого долгого уровня. Параметры **50/200/24** зафиксированы заранее и не подбираются по истории.
-
-Для первого классифицированного часа нужны 224 последовательные закрытые свечи: 223 предыдущих часа — только warm-up. До этого режим недоступен. Точка режима становится известна **в момент закрытия** своей часовой свечи. Например, в 10:45 UTC свеча 10:00–11:00 ещё неизвестна; функция `regime_at` может вернуть лишь режим свечи, закрывшейся в 10:00, или `None`, если корректных данных пока нет. Незакрытую часовую свечу использовать нельзя — это дало бы заглядывание в будущее. Функция пока не подключена к SMA, Donchian, Bollinger или PAPER Engine.
-
-Ручная диагностика читает только локальный кэш, показывает часы и проценты каждого режима, переходы, самые длинные непрерывные серии и последние точки по `--tail`. Дополнительно для режима свечи N она группирует **последующую** часовую доходность BTC `close(N+1) / close(N) − 1`; последняя свеча без N+1 исключается. Это описательная статистика, не backtest и не основание автоматически менять стратегию или параметры.
-
-```bash
-python -m ai_crypto_trader.diagnostics.market_regime --symbol BTCUSDT --interval 1h --start 2025-10-13T14:00:00+00:00 --end 2026-09-30T19:00:00+00:00 --tail 20
-```
-
-Начало выбрано только по границе доступности локального кэша: первая сохранённая 1h-свеча — 2025-10-04 07:00 UTC, плюс 223 часа warm-up дают 2025-10-13 14:00 UTC. Это не подбор по результатам. Более ранний `--start`, например 2025-10-05, при нынешнем кэше безопасно отклоняется. Для успешного запуска нужны все 223 часовые свечи **до** `--start` и весь непрерывный evaluation period. Команда не обращается к сети и не меняет исторический кэш или PAPER Ledger.
-
-## Атрибуция сделок по режиму рынка
-
-Дополнительный флаг `--regime-analysis` в offline-backtest **только измеряет** уже выполненные симулятором сделки SMA, Donchian или Bollinger. Он читает из того же локального кэша BTCUSDT 1h, рассчитывает прежний режим 50/200/24 без новых правил и вызывает `regime_at(timestamp)` для четырёх моментов каждой завершённой сделки: сигнала входа, исполнения входа, сигнала выхода и исполнения выхода. Режим сигнала входа — основная группа качества сделки: именно в этот момент было известно решение об открытии. Записанный в backtest Ledger timestamp сигнальной свечи обозначает её **open**; момент формирования сигнала — её **close**, совпадающий в существующей модели с `open` следующей свечи исполнения. В 10:45 нельзя использовать режим незакрытой часовой свечи 10:00–11:00.
-
-Для каждой группы `BULL`/`BEAR`/`SIDEWAYS` отчёт показывает число завершённых сделок, долю завершённых входов, wins/losses, win rate, gross profit/loss, profit factor, средний/медианный P&L, средний результат победителей/проигравших, итоговый net P&L, P&L до издержек, комиссию, slippage, суммарные издержки, среднее время удержания и turnover. Матрица `ENTRY SIGNAL REGIME → EXIT SIGNAL REGIME` показывает число завершённых сделок и их net P&L в каждой из девяти ячеек. Незакрытая позиция показана отдельно и не включается в win rate, доли завершённых входов и матрицу. Суммы сверяются с существующей trade-quality аналитикой; комиссия и slippage не списываются повторно.
-
-Для флага нужны непрерывные закрытые 1h-свечи, покрывающие **весь** 15m evaluation period и ещё 223 часа перед первым необходимым часовым режимом. Если их нет, дополнительный анализ отказывается работать; обычный backtest без флага остаётся прежним. Атрибуция не фильтрует сигналы, не меняет position size и не делает вывода «торговать только в BULL». Если после просмотра этой статистики отключить неудачный режим, это уже будет **новая** стратегия, которую нельзя объявлять проверенной на той же истории: потребуется заранее выбранный новый out-of-sample период.
-
-```bash
-python -m ai_crypto_trader.diagnostics.backtest --symbol BTCUSDT --interval 15m --strategy donchian-breakout --entry-lookback 96 --exit-lookback 48 --position-size-pct 25 --start 2025-10-13T15:00:00+00:00 --end 2026-09-30T19:15:00+00:00 --regime-analysis
-```
-
-Здесь граница `--start` была сдвинута только ради доступного на момент первого запуска 1h warm-up, а не по доходности. После последующего расширения локальной истории доступность более ранних границ нужно проверять заново. Codex не запускает этот backtest на реальной истории автоматически.
-
-## Donchian + BULL: отдельная гипотеза
-
-Атрибуция обычного Donchian 96/48 на уже просмотренных данных показала положительный результат входов в BULL после издержек и отрицательный результат других режимов. Эти старые данные теперь служат **только для формирования гипотезы**, а не для её подтверждения. Отдельная стратегия `donchian-bull-regime` оставляет Donchian baseline неизменным: BUY по прежнему строгому пробою предыдущих 96 high разрешается только при `BULL`; SELL по строгому пробою вниз предыдущих 48 low закрывает позицию при любом режиме. Смена BULL на BEAR сама по себе не вызывает SELL. Параметры входа/выхода `96/48`, размер `25%` и классификатор режима `50/200/24` фиксированы; выбирать другой режим или оптимизировать параметры CLI не позволяет.
-
-Фильтр спрашивает `regime_at` в момент **закрытия** сигнальной 15m-свечи. Например, в 10:45 он не видит ещё не закрытую 1h-свечу 10:00–11:00. Если режим недоступен, новый BUY блокируется; SELL не блокируется. Для запуска нужны 96 предыдущих 15m-свечей и полный непрерывный 1h-период с 223 часами warm-up. CLI читает оба диапазона только из локального SQLite-кэша и отказывается работать, если любого слоя не хватает. `REGIME FILTER` показывает количество сырых Donchian BUY-сигналов, разрешённых BULL и заблокированных BEAR, SIDEWAYS или отсутствием режима. Остальная аналитика и три benchmark общие для всех baseline; исторический кэш и PAPER Ledger не меняются.
-
-Новый период **2025-04-08 19:15 UTC → 2025-10-05 19:15 UTC** был выбран до просмотра результата этой гипотезы и предназначен для первого независимого OOS-теста. Команда ниже приведена для ручного запуска; при реализации она не выполняется:
-
-```bash
-python -m ai_crypto_trader.diagnostics.backtest --symbol BTCUSDT --interval 15m --strategy donchian-bull-regime --entry-lookback 96 --exit-lookback 48 --position-size-pct 25 --start 2025-04-08T19:15:00+00:00 --end 2025-10-05T19:15:00+00:00
-```
-
-Даже положительный OOS-результат сам по себе не доказывает будущую прибыль. После просмотра этого периода нельзя менять параметры и повторно называть проверку на тех же датах out-of-sample.
-
-## 1h BULL Regime Hold: заранее зарегистрированный эксперимент
-
-Это отдельная BTCUSDT spot стратегия на часовых свечах. Она покупает только при смене последнего **полностью закрытого** режима с BEAR или SIDEWAYS на BULL, если позиции нет. Пока часы остаются BULL, повторных покупок нет. При смене BULL на SIDEWAYS или BEAR она закрывает всю открытую позицию. Режим рассчитывает существующий `MarketRegimeAnalyzer` по SMA50, SMA200 и наклону SMA200 за 24 часа; параметры и размер позиции 25% зафиксированы заранее. У стратегии нет дополнительных фильтров или optimizer.
-
-Часовой интервал выбран как гипотеза о меньшем шуме и обороте, но снижение затрат или прибыль не гарантированы. Сигнал доступен лишь после закрытия часовой свечи N; исполнение идёт по `open` свечи N+1 с обычными комиссией и slippage. Для первого evaluation-сигнала нужны 224 предыдущие часовые свечи: 223 часа для расчёта предыдущего режима и час самой предыдущей точки. Эти свечи не создают сделок и не входят в P&L или benchmark. Отчёт показывает переходы режимов, обычный `TRADE QUALITY` и три benchmark на одинаковом evaluation period.
-
-Период `[2024-10-10T20:00:00+00:00, 2025-04-08T20:00:00+00:00)` был записан в [реестре экспериментов](docs/experiment_registry.md) до реализации стратегии. Ниже команда для **первого ручного** просмотра его результата; при разработке она не запускалась:
-
-```bash
-python -m ai_crypto_trader.diagnostics.backtest --symbol BTCUSDT --interval 1h --strategy regime-bull-hold --position-size-pct 25 --start 2024-10-10T20:00:00+00:00 --end 2025-04-08T20:00:00+00:00
-```
-
-После первого просмотра этот период уже не является новым независимым OOS для изменённой стратегии. Корректировать правила по его результату и повторно проверять их на тех же датах как на «новом OOS» нельзя.
-
-## Перенос на VPS
-
-Позже конфигурация останется environment-based: секреты следует передавать через защищённое окружение сервиса, а не копировать в код, Docker-образ или Git. Перед круглосуточным запуском понадобятся журналирование, перезапуск процесса, мониторинг и резервное копирование внутреннего ledger.
+Research, educational and portfolio project. Not financial advice. No guarantee
+of future profitability. Simulated fills do not reproduce all real-world market
+conditions. The repository contains no exchange-order execution implementation.

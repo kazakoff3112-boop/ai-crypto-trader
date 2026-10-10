@@ -1,6 +1,11 @@
 # Развёртывание только Live Shadow Mode на Linux VPS
 
-AI Crypto Trader живёт в `/opt/ai-crypto-trader/`. другие сервисы остаётся в своём каталоге, со своим пользователем, virtualenv, `.env`, SQLite, журналами и systemd units. Остановка или обновление одного приложения не требует остановки другого. Здесь работают только публичные `BTCUSDT spot 1h` свечи и локальный журнал shadow-решений; API-ключи не нужны. Никаких PAPER или Bybit ордеров эти unit-файлы не запускают.
+Публичная история документации очищена перед публикацией. Для ранее
+установленного private deployment сначала прочитайте [замечание о Git
+history](../docs/publication.md): автоматический fast-forward из публичного
+репозитория может быть невозможен. Не делайте force/reset production.
+
+AI Crypto Trader использует пример каталога `/opt/ai-crypto-trader/` и отдельного пользователя, virtualenv, `.env`, SQLite, журналы и systemd units. Остановка или обновление приложения не должны затрагивать другие сервисы сервера. Здесь работают только публичные `BTCUSDT spot 1h` свечи и локальный журнал shadow-решений; API-ключи не нужны. Никаких PAPER или Bybit ордеров эти unit-файлы не запускают.
 
 Перед командами замените `operator@VPS` на свой SSH-логин и адрес сервера. Команды под заголовком «Mac» выполняются на Mac; остальные — только на VPS. **Codex не подключается к VPS и не переносит базу автоматически.** На сервере нужны Linux с systemd, Python 3.9+, Git и `sqlite3` CLI. Примеры рассчитаны на Debian/Ubuntu; для другого дистрибутива адаптируйте установку пакетов.
 
@@ -32,12 +37,12 @@ Systemd считает `10` и `75` штатным окончанием (`Succes
 
 1. На Mac прекратите все shadow-команды (`--once`, `--catch-up`, `--status`) и убедитесь, что shadow-процессов больше нет. **После переноса и включения VPS не запускайте live `--once` или `--catch-up` на Mac:** VPS становится единственным активным источником shadow-решений, Mac остаётся средой разработки. Не удаляйте локальную БД.
 
-2. На Mac из каталога проекта подготовьте commit-бандл кода и вычислите SHA-256 **исходной** БД. В проекте пока не настроен Git remote, поэтому bundle переносит именно зафиксированный commit без `.env` и SQLite:
+2. На Mac из каталога проекта подготовьте commit-бандл кода и вычислите SHA-256 **исходной** БД. Bundle переносит зафиксированный код без `.env` и SQLite; это альтернатива загрузке кода через Git remote:
 
    ```bash
-   cd "/path/to/ai-crypto-trader"
+   cd /path/to/ai-crypto-trader
    git status --short
-   git bundle create /tmp/ai-crypto-trader.bundle --all
+   git bundle create /tmp/ai-crypto-trader.bundle main
    shasum -a 256 data/shadow_trading.sqlite3
    ls -l data/shadow_trading.sqlite3*
    ```
@@ -51,7 +56,7 @@ Systemd считает `10` и `75` штатным окончанием (`Succes
    scp data/shadow_trading.sqlite3 operator@VPS:/tmp/ai-crypto-shadow-transfer.sqlite3
    ```
 
-4. На VPS установите зависимости, создайте отдельного service user, каталог и virtualenv. Каталог `/opt/ai-crypto-trader/` должен быть новым и не принадлежать других сервисов:
+4. На VPS установите зависимости, создайте отдельного service user, каталог и virtualenv. Каталог `/opt/ai-crypto-trader/` должен быть новым и не принадлежать другому приложению:
 
    ```bash
    sudo apt-get update
@@ -84,7 +89,7 @@ Systemd считает `10` и `75` штатным окончанием (`Succes
    sudo -u ai-crypto-shadow .venv/bin/python -m ai_crypto_trader.diagnostics.shadow_runner --status
    ```
 
-   До переноса отдельно зафиксируйте ожидаемые версию стратегии, состояние, counts и последнюю UTC-свечу. Сравните с восстановленным снимком. При несоответствии timer не включайте. GAP требует отдельной проверки, не создания пустой базы.
+   До переноса отдельно зафиксируйте ожидаемые версию стратегии, состояние, число обработанных свечей, BUY/SELL counts и последнюю UTC-свечу. Сравните с восстановленным снимком; никаких production-значений этот шаблон не содержит. При любом несоответствии timer не включайте. `Health` может уже показывать `GAP` из-за прошедшего времени; это не повод создавать новую пустую БД.
 
 7. Установите units, проверьте их, запустите **один** service run и посмотрите результат. `--once` запишет только одно решение, если новый закрытый час идёт сразу после последнего. При `GAP` он завершится кодом `21` без записи:
 
@@ -128,7 +133,7 @@ VPS этой задачей не обновляется. Перед работо
 Git commit и bundle нового `main`, не включая `.env` или SQLite.
 
 1. На VPS остановите `ai-crypto-shadow.timer` и дождитесь, пока
-   `ai-crypto-shadow.service` станет `inactive`; других сервисов не трогайте.
+   `ai-crypto-shadow.service` станет `inactive`; другие сервисы не трогайте.
 2. Сделайте SQLite `.backup` действующей `shadow_trading.sqlite3` по разделу
    выше и проверьте `PRAGMA integrity_check`. Запишите исходный Git HEAD.
 3. Передайте только bundle кода. Выполните `git fetch` и `merge --ff-only`
@@ -144,7 +149,7 @@ Git commit и bundle нового `main`, не включая `.env` или SQLi
    от пользователя `ai-crypto-shadow`. Проверьте pending/status и один
    systemd service run по процедуре ниже.
 6. После успешных проверок запустите timer, убедитесь в штатном journal и
-   `other-service.timer=active`. При ошибке остановите AI timer и
+   состояние остальных сервисов сервера не изменилось. При ошибке остановите AI timer и
    разберите причину; не восстанавливайте shadow DB автоматически.
 
 Telegram используется только для `sendMessage`: ни входящих команд, ни
