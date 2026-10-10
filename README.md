@@ -39,21 +39,41 @@ not an AI model or a promise of profitable trading.
 
 ## Architecture
 
-```text
-Public Market Data (validated closed candles)
-   ↓
-Market Regime Analyzer
-   ↓
-Strategy
-   ↓
-Shadow Runner (FLAT / LONG; no execution)
-   ↓
-SQLite Decision Log
-   ↓
-Telegram Alerts (outgoing only)
+Market analysis, strategy rules, simulation, storage and notifications are
+separate so each part can be checked independently. The main path observes the
+market and records signals; the other paths simulate results without exchange
+orders.
 
-Historical Cache (read-only) → Backtester → Trade / Regime Analytics
-Explicit manual request     → Paper Engine → Portfolio / SQLite Ledger
+```mermaid
+flowchart TB
+    bybit["Bybit V5 public spot data"] --> candles["Validated historical / live candles"]
+    candles --> regime["Market Regime Analyzer"]
+    regime --> hold["BULL Regime Hold strategy"]
+    hold --> shadow["Shadow Runner: signals only"]
+    shadow --> decisions["Append-only Shadow SQLite"]
+    decisions --> outbox["Notification SQLite: outbox and deduplication"]
+    outbox --> telegram["Telegram alerts: outgoing only"]
+
+    subgraph research["Offline backtesting"]
+        cache["Historical SQLite cache"] --> backtest["Backtesting Engine"]
+        strategies["SMA Crossover, Donchian Breakout, Bollinger Mean Reversion, regime-aware"] --> backtest
+        backtest --> analytics["Benchmarks, fees/slippage, exposure, analytics"]
+    end
+    candles --> cache
+
+    subgraph paper["Manual paper simulation"]
+        quotes["Fresh spot quotes"] --> paperEngine["Paper Trading Engine: no real orders"]
+        paperEngine --> portfolio["Virtual Portfolio"] --> ledger["SQLite Ledger"]
+    end
+    bybit --> quotes
+
+    subgraph safety["Safety layer"]
+        guard["Spot only; no leverage, margin or derivatives; fail-closed validation"]
+        continuity["Duplicate protection, process lock, controlled catch-up"]
+    end
+    guard -.-> candles
+    guard -.-> paperEngine
+    continuity -.-> shadow
 ```
 
 These paths are deliberately separate: a shadow signal does not become a paper
