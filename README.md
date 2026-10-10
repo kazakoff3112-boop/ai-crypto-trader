@@ -7,6 +7,8 @@ market-regime analysis, execution simulation and an order-free **Shadow Mode**.
 The name is a project label: the current strategies are deterministic rules,
 not an AI model or a promise of profitable trading.
 
+<img src="docs/assets/ai-crypto-trader-social-preview.png" alt="AI Crypto Trader social preview" width="720">
+
 ## What it does
 
 - Validated BTC/ETH spot market data through the Bybit V5 public API.
